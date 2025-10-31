@@ -57,13 +57,19 @@ coverage.xml
 # Remove data file
 /medvae/data/
 
+
 # Environment files
 *.env
 *.vscode
 
 # Data files
 data/
-
+real_data/
+generated_data/
 # Log files
 logs/
-*.log
+*.log# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+
