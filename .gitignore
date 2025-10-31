@@ -67,3 +67,12 @@ data/
 # Log files
 logs/
 *.log
+real_data/
+generated_data/
+# Log files
+logs/
+*.log# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+
