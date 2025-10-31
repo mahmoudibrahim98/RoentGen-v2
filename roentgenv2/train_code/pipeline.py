@@ -22,6 +22,7 @@ def create_and_save_pipeline(
     kwargs_from_pretrained,
     unet_config_changed,
     unet_config,
+    hcn=None,  # Hierarchical Conditioner Network
 ):
     # Unwrap unet
     unet = accelerator.unwrap_model(unet)
@@ -77,6 +78,15 @@ def create_and_save_pipeline(
         tokenizer.save_pretrained(
             os.path.join(args.output_dir, "text_encoder_and_tokenizer")
         )
+
+        # === Save HCN ===
+        if hcn is not None:
+            print("Saving HCN (Hierarchical Conditioner Network)...")
+            hcn_unwrapped = accelerator.unwrap_model(hcn)
+            hcn_save_path = os.path.join(args.output_dir, "hcn")
+            hcn_unwrapped.save_pretrained(hcn_save_path)
+            print(f"HCN saved to {hcn_save_path}")
+
     # CHECK: do i still need this?
     elif (not args.do_not_save_weights) and (args.save_only_modified_weights):
         raise Warning("might be broken")

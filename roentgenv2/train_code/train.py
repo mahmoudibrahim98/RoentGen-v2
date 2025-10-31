@@ -33,7 +33,7 @@ check_min_version("0.27.0.dev0")
 from dataset_wds import RGFineTuningWebDataset, RGFineTuningImageDirectoryDataset
 from train_loop import train_loop
 from pipeline import create_and_save_pipeline
-from models import load_models, EMAModel
+from models import load_models, EMAModel, load_hcn
 
 ##########################################################
 def main(args):
@@ -112,7 +112,7 @@ def main(args):
         yaml.dump(args.get_config(), file)
 
     ##########################################################
-    ### Get the models: text_encoder, vae, unet, tokenizer ###
+    ### Get the models: text_encoder, vae, unet, tokenizer, HCN ###
     (
         text_encoder,
         tokenizer,
@@ -126,6 +126,9 @@ def main(args):
         kwargs_from_pretrained,
     ) = load_models(args, accelerator, logger)
 
+    # Load HCN (Hierarchical Conditioner Network)
+    hcn = load_hcn(args, logger)
+
     # Freeze vae and text_encoder
     if args.image_type == "pt":
         vae.requires_grad_(False)
@@ -135,6 +138,10 @@ def main(args):
 
     if args.train_text_encoder and freeze_pooler:
         text_encoder.pooler.requires_grad_(False)
+
+    # HCN is trainable
+    if hcn is not None:
+        hcn.requires_grad_(True)
     ##########################################################
     if is_xformers_available():
         try:
@@ -186,6 +193,11 @@ def main(args):
         else unet.parameters()
     )
 
+    # Add HCN parameters to optimizer
+    if hcn is not None:
+        params_to_optimize = itertools.chain(params_to_optimize, hcn.parameters())
+        logger.info("Adding HCN parameters to optimizer")
+
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -214,6 +226,7 @@ def main(args):
             url_list=url_list,
             tokenizer=tokenizer,
             data_filter_file=args.data_filter_file,
+            use_hcn=args.use_hcn,
         )
 
         train_dataloader = torch.utils.data.DataLoader(
@@ -228,7 +241,8 @@ def main(args):
             image_dir_path=args.image_dir,
             text_dir_path=args.prompt_dir,
             tokenizer=tokenizer,
-            data_filter_file=args.data_filter_file
+            data_filter_file=args.data_filter_file,
+            use_hcn=args.use_hcn,
         )
 
         with accelerator.main_process_first():
@@ -267,19 +281,36 @@ def main(args):
     ##########################################################
     ### Prepare everything with accelerator ###
     if args.train_text_encoder:
-        (
-            unet,
-            text_encoder,
-            optimizer,
-            train_dataloader,
-            lr_scheduler,
-        ) = accelerator.prepare(
-            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
-        )
+        if hcn is not None:
+            (
+                unet,
+                text_encoder,
+                hcn,
+                optimizer,
+                train_dataloader,
+                lr_scheduler,
+            ) = accelerator.prepare(
+                unet, text_encoder, hcn, optimizer, train_dataloader, lr_scheduler
+            )
+        else:
+            (
+                unet,
+                text_encoder,
+                optimizer,
+                train_dataloader,
+                lr_scheduler,
+            ) = accelerator.prepare(
+                unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+            )
     else:
-        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, optimizer, train_dataloader, lr_scheduler
-        )
+        if hcn is not None:
+            unet, hcn, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                unet, hcn, optimizer, train_dataloader, lr_scheduler
+            )
+        else:
+            unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                unet, optimizer, train_dataloader, lr_scheduler
+            )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
@@ -405,6 +436,7 @@ def main(args):
         optimizer,
         lr_scheduler,
         ema_unet,
+        hcn,  # Add HCN parameter
     )
 
     accelerator.wait_for_everyone()
@@ -424,6 +456,7 @@ def main(args):
             kwargs_from_pretrained,
             unet_config_changed,
             unet_config,
+            hcn,  # Add HCN parameter
         )
     ##########################################################
 

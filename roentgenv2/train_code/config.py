@@ -112,6 +112,30 @@ class BaseConfig:
     # `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.
     resume_from_checkpoint: str = None
 
+    # ====== HCN (Hierarchical Conditioner Network) Parameters ======
+    # Whether to use HCN for compositional demographic embeddings
+    use_hcn: bool = False
+    # Hidden dimension for HCN embeddings
+    hcn_d_node: int = 256
+    # Output dimension for HCN (should match text encoder output, e.g., 1024 for SD 2.1)
+    hcn_d_ctx: int = 1024
+    # Dropout probability in HCN MLPs
+    hcn_dropout: float = 0.1
+    # Whether to use uncertainty quantification in HCN
+    hcn_use_uncertainty: bool = True
+    # Number of age bins for categorization
+    hcn_num_age_bins: int = 5
+    # Number of sex categories (typically 2: M/F)
+    hcn_num_sex: int = 2
+    # Number of race/ethnicity categories
+    hcn_num_race: int = 4
+    # Weight for KL divergence loss (uncertainty regularization)
+    hcn_kl_weight: float = 0.001
+    # Number of steps to anneal KL weight from 0 to target value
+    hcn_kl_anneal_steps: int = 10000
+    # Weight for compositional consistency loss
+    hcn_comp_weight: float = 0.01
+
     def get_config(self):
         return self.__dict__
 
