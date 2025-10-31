@@ -20,6 +20,7 @@ def train_loop(
     optimizer,
     lr_scheduler,
     ema_unet,
+    hcn=None,  # Hierarchical Conditioner Network for compositional demographics
 ):
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
@@ -35,6 +36,10 @@ def train_loop(
 
         if args.train_text_encoder:
             text_encoder.train()
+
+        # Set HCN to training mode
+        if hcn is not None:
+            hcn.train()
 
         for step, batch in enumerate(train_dataloader):
             logger.info("*** batch {} ***".format(batch["pixel_values"].shape))
@@ -78,7 +83,37 @@ def train_loop(
                     attention_mask=attention_mask,
                     return_dict=False,
                 )
-                encoder_hidden_states = prompt_embeds[0]
+                encoder_hidden_states = prompt_embeds[0]  # [B, 77, d_ctx]
+
+                # === HCN: Hierarchical Conditioning ===
+                kl_loss = None
+                comp_loss = None
+                if hcn is not None:
+                    # Get HCN demographic context
+                    hcn_ctx, mu, logsigma = hcn(
+                        batch["age_idx"],
+                        batch["sex_idx"],
+                        batch["race_idx"],
+                    )  # hcn_ctx: [B, 1, d_ctx]
+
+                    # Concatenate text and demographic contexts
+                    encoder_hidden_states = torch.cat(
+                        [encoder_hidden_states, hcn_ctx], dim=1
+                    )  # [B, 78, d_ctx] = 77 text tokens + 1 demographic token
+
+                    # Compute KL divergence loss (uncertainty regularization)
+                    # KL(N(mu, sigma) || N(0, 1))
+                    kl_loss = -0.5 * torch.sum(
+                        1 + 2 * logsigma - mu ** 2 - torch.exp(2 * logsigma),
+                        dim=-1
+                    ).mean()
+
+                    # Compute compositional consistency loss
+                    comp_loss = hcn.compute_compositional_loss(
+                        batch["age_idx"],
+                        batch["sex_idx"],
+                        batch["race_idx"],
+                    )
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -105,6 +140,15 @@ def train_loop(
                 loss_weights = batch["loss_weights"].to(dtype=weight_dtype)
                 loss = (loss * loss_weights).sum() / loss_weights.sum()
 
+                # === Add HCN losses ===
+                if kl_loss is not None:
+                    # Anneal KL weight from 0 to target value over training
+                    kl_weight = min(1.0, global_step / args.hcn_kl_anneal_steps) * args.hcn_kl_weight
+                    loss = loss + kl_weight * kl_loss
+
+                if comp_loss is not None:
+                    loss = loss + args.hcn_comp_weight * comp_loss
+
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
@@ -112,6 +156,10 @@ def train_loop(
                         if args.train_text_encoder
                         else unet.parameters()
                     )
+                    # Add HCN parameters to gradient clipping
+                    if hcn is not None:
+                        params_to_clip = itertools.chain(params_to_clip, hcn.parameters())
+
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -166,6 +214,14 @@ def train_loop(
                 # TODO: add validation pass
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+
+            # Add HCN losses to logging
+            if kl_loss is not None:
+                logs["kl_loss"] = kl_loss.detach().item()
+                logs["kl_weight"] = kl_weight
+            if comp_loss is not None:
+                logs["comp_loss"] = comp_loss.detach().item()
+
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 

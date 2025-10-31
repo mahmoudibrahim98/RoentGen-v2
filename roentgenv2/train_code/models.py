@@ -288,3 +288,50 @@ class EMAModel:
             )
             for p in self.shadow_params
         ]
+
+
+##########################################################
+def load_hcn(args, logger):
+    """
+    Load and initialize HCN (Hierarchical Conditioner Network) if enabled.
+
+    Args:
+        args: Training arguments/config
+        logger: Logger instance
+
+    Returns:
+        hcn: HierarchicalConditioner instance or None if not enabled
+    """
+    if not args.use_hcn:
+        logger.info("HCN disabled (use_hcn=False)")
+        return None
+
+    logger.info("Initializing Hierarchical Conditioner Network (HCN)")
+
+    try:
+        from hcn import HierarchicalConditioner
+    except ImportError:
+        raise ImportError(
+            "Could not import HCN module. Make sure hcn.py is in the same directory."
+        )
+
+    hcn = HierarchicalConditioner(
+        num_age_bins=args.hcn_num_age_bins,
+        num_sex=args.hcn_num_sex,
+        num_race=args.hcn_num_race,
+        d_node=args.hcn_d_node,
+        d_ctx=args.hcn_d_ctx,
+        dropout=args.hcn_dropout,
+        use_uncertainty=args.hcn_use_uncertainty,
+    )
+
+    num_params = sum(p.numel() for p in hcn.parameters())
+    logger.info(f"HCN initialized with {num_params:,} parameters")
+    logger.info(f"  - Age bins: {args.hcn_num_age_bins}")
+    logger.info(f"  - Sex categories: {args.hcn_num_sex}")
+    logger.info(f"  - Race categories: {args.hcn_num_race}")
+    logger.info(f"  - Node dimension: {args.hcn_d_node}")
+    logger.info(f"  - Context dimension: {args.hcn_d_ctx}")
+    logger.info(f"  - Uncertainty: {args.hcn_use_uncertainty}")
+
+    return hcn

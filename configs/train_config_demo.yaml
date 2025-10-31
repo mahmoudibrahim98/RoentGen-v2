@@ -33,3 +33,20 @@ output_dir: "/content/RoentGen-v2/outputs"
 
 checkpointing_steps: 1 #500
 resume_from_checkpoint: "latest"
+
+# ====== Hierarchical Conditioner Network (HCN) Settings ======
+# Enable HCN for compositional demographic learning
+use_hcn: True
+# HCN architecture parameters
+hcn_d_node: 256          # Hidden dimension for embeddings
+hcn_d_ctx: 1024          # Output dimension (must match text encoder: 1024 for SD 2.1)
+hcn_dropout: 0.1         # Dropout in MLPs
+hcn_use_uncertainty: True  # Enable uncertainty quantification
+# Demographic categories
+hcn_num_age_bins: 5      # [0-18, 18-40, 40-60, 60-80, 80+]
+hcn_num_sex: 2           # [Male, Female]
+hcn_num_race: 4          # [White, Black, Asian, Hispanic]
+# Training losses
+hcn_kl_weight: 0.001     # Weight for KL divergence (uncertainty regularization)
+hcn_kl_anneal_steps: 10000  # Steps to anneal KL weight from 0 to target
+hcn_comp_weight: 0.01    # Weight for compositional consistency loss

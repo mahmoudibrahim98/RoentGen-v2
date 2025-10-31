@@ -1,4 +1,5 @@
 import os
+import re
 import webdataset as wds
 import pickle
 import struct
@@ -12,6 +13,94 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset, get_worker_info, Dataset
 from torchvision.transforms import Compose, Resize, Normalize, InterpolationMode
+
+
+#####################################################
+# Demographic Parsing Functions for HCN
+#####################################################
+
+def parse_age_bin(prompt: str, bins=[18, 40, 60, 80]) -> int:
+    """
+    Extract age from prompt and map to bin index.
+
+    Default bins: [0-18, 18-40, 40-60, 60-80, 80+]
+
+    Args:
+        prompt: Text prompt containing age information
+        bins: Age thresholds for binning
+
+    Returns:
+        Age bin index (0 to len(bins))
+    """
+    match = re.search(r'(\d+)\s*year', prompt, re.IGNORECASE)
+    if not match:
+        return 0  # Default to youngest bin if not found
+
+    age = int(match.group(1))
+    for i, threshold in enumerate(bins):
+        if age < threshold:
+            return i
+    return len(bins)  # Last bin (80+)
+
+
+def parse_sex(prompt: str) -> int:
+    """
+    Extract sex from prompt.
+
+    Returns:
+        0: male
+        1: female
+    """
+    prompt_lower = prompt.lower()
+    if 'female' in prompt_lower or 'woman' in prompt_lower:
+        return 1
+    elif 'male' in prompt_lower or 'man' in prompt_lower:
+        return 0
+    else:
+        return 0  # Default to male if not specified
+
+
+def parse_race(prompt: str) -> int:
+    """
+    Extract race/ethnicity from prompt.
+
+    Returns:
+        0: White
+        1: Black/African American
+        2: Asian
+        3: Hispanic/Latino
+    """
+    prompt_upper = prompt.upper()  # RoentGen uses uppercase for race
+
+    if 'BLACK' in prompt_upper or 'AFRICAN' in prompt_upper:
+        return 1
+    elif 'ASIAN' in prompt_upper:
+        return 2
+    elif 'HISPANIC' in prompt_upper or 'LATINO' in prompt_upper:
+        return 3
+    else:
+        return 0  # Default to White
+
+
+def extract_clinical_text(prompt: str) -> str:
+    """
+    Extract clinical findings from full prompt (removes demographics).
+
+    RoentGen format: "XX year old RACE GENDER. CLINICAL_FINDINGS"
+    We extract everything after the first period.
+
+    Args:
+        prompt: Full prompt with demographics and clinical text
+
+    Returns:
+        Clinical text only (without demographics)
+    """
+    parts = prompt.split('.', 1)
+    if len(parts) > 1:
+        clinical_text = parts[1].strip()
+        return clinical_text if clinical_text else "Normal chest radiograph"
+    else:
+        return "Normal chest radiograph"  # Fallback
 
 
 #####################################################
@@ -39,7 +128,7 @@ class SquarePad:
 
 #####################################################
 class RGFineTuningWebDataset(IterableDataset):
-    def __init__(self, url_list, tokenizer, data_filter_file=None):
+    def __init__(self, url_list, tokenizer, data_filter_file=None, use_hcn=False):
         # self.webdataset = wds.WebDataset(url_list).shuffle(1024)
         self.url_list = url_list
         self.webdataset = wds.DataPipeline(
@@ -69,6 +158,10 @@ class RGFineTuningWebDataset(IterableDataset):
         )
 
         self.tokenizer = tokenizer
+        self.use_hcn = use_hcn
+
+        if use_hcn:
+            print("HCN mode enabled: parsing demographics from prompts")
 
     def __len__(self):
         if self.data_filter is not None:
@@ -91,15 +184,36 @@ class RGFineTuningWebDataset(IterableDataset):
         )
         sample["pixel_values"] = self.image_transforms(sample["pixel_values"])
 
-        # TODO: change the hard-coded prompt key part to maybe a parameter passed to dataset class
+        # Parse full prompt
         prompt = item["prompt_metadata"].decode("utf-8")
-        prompt_tokenized = self.tokenizer(
-            prompt,
-            padding="max_length",
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-            return_tensors="pt",
-        )
+
+        if self.use_hcn:
+            # Extract demographics as categorical indices
+            sample["age_idx"] = torch.tensor(parse_age_bin(prompt), dtype=torch.long)
+            sample["sex_idx"] = torch.tensor(parse_sex(prompt), dtype=torch.long)
+            sample["race_idx"] = torch.tensor(parse_race(prompt), dtype=torch.long)
+
+            # Extract clinical text only (remove demographics)
+            clinical_text = extract_clinical_text(prompt)
+
+            # Tokenize clinical text only
+            prompt_tokenized = self.tokenizer(
+                clinical_text,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt",
+            )
+        else:
+            # Use full prompt (original behavior)
+            prompt_tokenized = self.tokenizer(
+                prompt,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt",
+            )
+
         sample["input_ids"] = prompt_tokenized.input_ids.squeeze()
         sample["attention_mask"] = prompt_tokenized.attention_mask.squeeze()
         sample["loss_weights"] = torch.FloatTensor([1.0]).squeeze()
@@ -135,11 +249,13 @@ class RGFineTuningImageDirectoryDataset(Dataset):
         data_filter_file (str, optional): Path to a file containing a list of image stems
                                           to include. Each line should be an image stem (e.g., 'image001').
                                           Defaults to None, meaning no filter is applied.
+        use_hcn (bool): Whether to use HCN mode (parse demographics)
     """
-    def __init__(self, image_dir_path, text_dir_path, tokenizer, data_filter_file=None):
+    def __init__(self, image_dir_path, text_dir_path, tokenizer, data_filter_file=None, use_hcn=False):
         self.image_dir_path = image_dir_path
         self.text_dir_path = text_dir_path
         self.tokenizer = tokenizer
+        self.use_hcn = use_hcn
 
         # Initialize image transformations
         self.image_transforms = Compose(
@@ -218,13 +334,33 @@ class RGFineTuningImageDirectoryDataset(Dataset):
         with open(text_path, "r", encoding="utf-8") as f:
             prompt = f.read().strip()
 
-        prompt_tokenized = self.tokenizer(
-            prompt,
-            padding="max_length",
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-            return_tensors="pt",
-        )
+        if self.use_hcn:
+            # Extract demographics as categorical indices
+            sample["age_idx"] = torch.tensor(parse_age_bin(prompt), dtype=torch.long)
+            sample["sex_idx"] = torch.tensor(parse_sex(prompt), dtype=torch.long)
+            sample["race_idx"] = torch.tensor(parse_race(prompt), dtype=torch.long)
+
+            # Extract clinical text only (remove demographics)
+            clinical_text = extract_clinical_text(prompt)
+
+            # Tokenize clinical text only
+            prompt_tokenized = self.tokenizer(
+                clinical_text,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt",
+            )
+        else:
+            # Use full prompt (original behavior)
+            prompt_tokenized = self.tokenizer(
+                prompt,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt",
+            )
+
         sample["input_ids"] = prompt_tokenized.input_ids.squeeze()
         sample["attention_mask"] = prompt_tokenized.attention_mask.squeeze()
 
