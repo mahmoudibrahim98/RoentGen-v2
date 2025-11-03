@@ -1,0 +1,11 @@
+prompt,sex,race,age,atelectasis,cardiomegaly,edema,pneumothorax,pleural_effusion,image_id
+"45 year old White Male. Pneumothorax in the left lung",M,White,45,0,0,0,1,0,img_001
+"62 year old Black Female. Cardiomegaly with bilateral pleural effusion",F,Black,62,0,1,0,0,1,img_002
+"28 year old Asian Male. No acute cardiopulmonary findings",M,Asian,28,0,0,0,0,0,img_003
+"71 year old White Female. Pulmonary edema and cardiomegaly",F,White,71,0,1,1,0,0,img_004
+"55 year old Hispanic Male. Left lower lobe atelectasis",M,Hispanic,55,1,0,0,0,0,img_005
+"38 year old Black Male. Right-sided pneumothorax",M,Black,38,0,0,0,1,0,img_006
+"67 year old White Female. Bilateral pleural effusions",F,White,67,0,0,0,0,1,img_007
+"42 year old Asian Female. Cardiomegaly without pulmonary edema",F,Asian,42,0,1,0,0,0,img_008
+"80 year old White Male. Bibasilar atelectasis and small pleural effusions",M,White,80,1,0,0,0,1,img_009
+"51 year old Hispanic Female. Pulmonary edema",F,Hispanic,51,0,0,1,0,0,img_010

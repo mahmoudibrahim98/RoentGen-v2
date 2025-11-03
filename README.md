@@ -75,6 +75,27 @@ accelerate launch --num_processes 4 --multi_gpu --mixed_precision bf16 \
  --config_file="./configs/train_config_demo.yaml"
 ```
 
+### Model Checkpoint Validation
+
+To evaluate model checkpoints using comprehensive validation metrics (disease classification, demographic accuracy, image quality, and diversity):
+
+```bash
+python roentgenv2/train_code/run_validation.py \
+  --checkpoint_path ./checkpoints/checkpoint-5000 \
+  --validation_csv ./data/validation.csv \
+  --real_images_dir ./data/validation_images \
+  --output_dir ./validation_results
+```
+
+For detailed usage instructions and metric interpretation, see [VALIDATION_GUIDE.md](VALIDATION_GUIDE.md).
+
+The validation system implements three categories of metrics:
+1. **Text Prompt Alignment**: Disease AUROC, demographic accuracy (sex/race), age RMSE
+2. **Real-Synthetic Similarity**: FID, BioViL embeddings, MS-SSIM
+3. **Intra-Prompt Diversity**: MS-SSIM and BioViL embedding variability
+
+See [VALIDATION_IMPLEMENTATION.md](VALIDATION_IMPLEMENTATION.md) for implementation details.
+
 ## 📎 Citation
 
 If you find this repository useful for your work, please cite the following paper:
