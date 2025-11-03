@@ -24,7 +24,7 @@ def test_text_alignment_metrics():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     metrics = TextPromptAlignmentMetrics(device=device)
 
-    # Create dummy data
+    # Create dummy data on the correct device
     batch_size = 10
     synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
@@ -86,7 +86,7 @@ def test_similarity_metrics():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     metrics = RealSyntheticSimilarityMetrics(device=device)
 
-    # Create dummy data
+    # Create dummy data on the correct device
     batch_size = 10
     real_images = torch.randn(batch_size, 1, 512, 512).to(device)
     synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
@@ -165,12 +165,12 @@ def test_validation_runner(sex_model_path: str):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     runner = ValidationMetricsRunner(device=device, sex_model_path=sex_model_path)
 
-    # Create dummy data
+    # Create dummy data on the correct device
     batch_size = 10
     real_images = torch.randn(batch_size, 1, 512, 512).to(device)
     synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
-    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32)
+    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32).to(device)
     sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long).to(device)
     race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long).to(device)
     age_labels = (torch.rand(batch_size) * 72 + 18).to(device)
