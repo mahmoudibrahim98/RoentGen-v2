@@ -74,5 +74,10 @@ logs/
 *.log# pixi environments
 .pixi/*
 !.pixi/config.toml
+.lock# lock files
+.toml# toml files
+# Model 
+outputs/
 
-
+# Wandb
+wandb/
