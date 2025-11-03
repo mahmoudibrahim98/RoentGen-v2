@@ -78,6 +78,7 @@ logs/
 .toml# toml files
 # Model 
 outputs/
+pretrained_models/
 
 # Wandb
 wandb/
