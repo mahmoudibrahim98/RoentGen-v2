@@ -289,11 +289,27 @@ class RealSyntheticSimilarityMetrics:
         """Lazy load BioViL model for medical image embeddings."""
         if self.biovil_model is None:
             try:
-                from transformers import AutoModel
-                self.biovil_model = AutoModel.from_pretrained(
+                from transformers import AutoModel, AutoProcessor
+
+                # Load the full model
+                model = AutoModel.from_pretrained(
                     "microsoft/BiomedVLP-CXR-BERT-specialized",
                     trust_remote_code=True
                 )
+
+                # Extract only the vision encoder
+                if hasattr(model, 'vision_model'):
+                    self.biovil_model = model.vision_model
+                elif hasattr(model, 'vision_encoder'):
+                    self.biovil_model = model.vision_encoder
+                else:
+                    # If we can't find vision encoder, use full model with processor
+                    self.biovil_model = model
+                    self.biovil_processor = AutoProcessor.from_pretrained(
+                        "microsoft/BiomedVLP-CXR-BERT-specialized",
+                        trust_remote_code=True
+                    )
+
                 self.biovil_model.to(self.device)
                 self.biovil_model.eval()
             except Exception as e:
@@ -441,7 +457,31 @@ class RealSyntheticSimilarityMetrics:
         images = F.interpolate(images, size=(224, 224), mode="bilinear", align_corners=False)
 
         # Extract embeddings
-        embeddings = self.biovil_model(images.to(self.device))
+        try:
+            # Try direct image encoding (if we have vision encoder)
+            outputs = self.biovil_model(pixel_values=images.to(self.device))
+
+            # Handle different output formats
+            if hasattr(outputs, 'pooler_output'):
+                embeddings = outputs.pooler_output
+            elif hasattr(outputs, 'last_hidden_state'):
+                # Use CLS token or mean pooling
+                embeddings = outputs.last_hidden_state[:, 0]  # CLS token
+            elif isinstance(outputs, torch.Tensor):
+                embeddings = outputs
+            else:
+                embeddings = outputs[0][:, 0]  # Fallback
+
+        except TypeError:
+            # If that fails, it might need processor
+            if hasattr(self, 'biovil_processor'):
+                # Process images through the processor
+                inputs = self.biovil_processor(images=images, return_tensors="pt")
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                outputs = self.biovil_model(**inputs)
+                embeddings = outputs.pooler_output if hasattr(outputs, 'pooler_output') else outputs[0][:, 0]
+            else:
+                raise
 
         return embeddings
 
@@ -499,15 +539,32 @@ class IntraPromptDiversityMetrics:
         """Lazy load BioViL model."""
         if self.biovil_model is None:
             try:
-                from transformers import AutoModel
-                self.biovil_model = AutoModel.from_pretrained(
+                from transformers import AutoModel, AutoProcessor
+
+                # Load the full model
+                model = AutoModel.from_pretrained(
                     "microsoft/BiomedVLP-CXR-BERT-specialized",
                     trust_remote_code=True
                 )
+
+                # Extract only the vision encoder
+                if hasattr(model, 'vision_model'):
+                    self.biovil_model = model.vision_model
+                elif hasattr(model, 'vision_encoder'):
+                    self.biovil_model = model.vision_encoder
+                else:
+                    # If we can't find vision encoder, use full model with processor
+                    self.biovil_model = model
+                    self.biovil_processor = AutoProcessor.from_pretrained(
+                        "microsoft/BiomedVLP-CXR-BERT-specialized",
+                        trust_remote_code=True
+                    )
+
                 self.biovil_model.to(self.device)
                 self.biovil_model.eval()
             except Exception as e:
                 warnings.warn(f"Could not load BioViL model: {e}")
+                self.biovil_model = None
 
     def compute_intra_prompt_ms_ssim(
         self,
@@ -612,7 +669,31 @@ class IntraPromptDiversityMetrics:
         images = F.interpolate(images, size=(224, 224), mode="bilinear", align_corners=False)
 
         # Extract embeddings
-        embeddings = self.biovil_model(images.to(self.device))
+        try:
+            # Try direct image encoding (if we have vision encoder)
+            outputs = self.biovil_model(pixel_values=images.to(self.device))
+
+            # Handle different output formats
+            if hasattr(outputs, 'pooler_output'):
+                embeddings = outputs.pooler_output
+            elif hasattr(outputs, 'last_hidden_state'):
+                # Use CLS token or mean pooling
+                embeddings = outputs.last_hidden_state[:, 0]  # CLS token
+            elif isinstance(outputs, torch.Tensor):
+                embeddings = outputs
+            else:
+                embeddings = outputs[0][:, 0]  # Fallback
+
+        except TypeError:
+            # If that fails, it might need processor
+            if hasattr(self, 'biovil_processor'):
+                # Process images through the processor
+                inputs = self.biovil_processor(images=images, return_tensors="pt")
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                outputs = self.biovil_model(**inputs)
+                embeddings = outputs.pooler_output if hasattr(outputs, 'pooler_output') else outputs[0][:, 0]
+            else:
+                raise
 
         return embeddings
 
