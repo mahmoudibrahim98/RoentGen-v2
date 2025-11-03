@@ -26,19 +26,19 @@ def test_text_alignment_metrics():
 
     # Create dummy data
     batch_size = 10
-    synthetic_images = torch.randn(batch_size, 1, 512, 512)
+    synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
     # Disease labels (5 diseases)
-    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32)
+    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32).to(device)
 
     # Sex labels (0=M, 1=F)
-    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long)
+    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long).to(device)
 
     # Race labels (0-3)
-    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long)
+    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long).to(device)
 
     # Age labels (18-90 years)
-    age_labels = torch.rand(batch_size) * 72 + 18
+    age_labels = (torch.rand(batch_size) * 72 + 18).to(device)
 
     print("\n1. Testing disease AUROC computation...")
     try:
@@ -88,8 +88,8 @@ def test_similarity_metrics():
 
     # Create dummy data
     batch_size = 10
-    real_images = torch.randn(batch_size, 1, 512, 512)
-    synthetic_images = torch.randn(batch_size, 1, 512, 512)
+    real_images = torch.randn(batch_size, 1, 512, 512).to(device)
+    synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
     print("\n1. Testing FID computation...")
     try:
@@ -132,7 +132,7 @@ def test_diversity_metrics():
     num_prompts = 5
     images_per_prompt = 4
     images_list = [
-        torch.randn(images_per_prompt, 1, 512, 512)
+        torch.randn(images_per_prompt, 1, 512, 512).to(device)
         for _ in range(num_prompts)
     ]
 
@@ -156,28 +156,28 @@ def test_diversity_metrics():
         print(f"   ⚠️  BioViL error (optional): {e}")
 
 
-def test_validation_runner():
+def test_validation_runner(sex_model_path: str):
     """Test the complete validation metrics runner."""
     print("\n" + "="*60)
     print("Testing Complete Validation Metrics Runner")
     print("="*60)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    runner = ValidationMetricsRunner(device=device)
+    runner = ValidationMetricsRunner(device=device, sex_model_path=sex_model_path)
 
     # Create dummy data
     batch_size = 10
-    real_images = torch.randn(batch_size, 1, 512, 512)
-    synthetic_images = torch.randn(batch_size, 1, 512, 512)
+    real_images = torch.randn(batch_size, 1, 512, 512).to(device)
+    synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
     disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32)
-    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long)
-    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long)
-    age_labels = torch.rand(batch_size) * 72 + 18
+    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long).to(device)
+    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long).to(device)
+    age_labels = (torch.rand(batch_size) * 72 + 18).to(device)
 
     # Create images per prompt for diversity metrics
     images_per_prompt = [
-        torch.randn(4, 1, 512, 512)
+        torch.randn(4, 1, 512, 512).to(device)
         for _ in range(batch_size)
     ]
 
@@ -218,7 +218,7 @@ def main():
     test_diversity_metrics()
 
     # Run integrated test
-    metrics = test_validation_runner()
+    metrics = test_validation_runner(sex_model_path="/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/pretrained_models/sex/resnet-all/epoch=13-step=7125.ckpt")
 
     # Summary
     print("\n" + "="*60)

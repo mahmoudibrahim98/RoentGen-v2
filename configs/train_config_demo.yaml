@@ -4,9 +4,11 @@
 # Seed for reproducibility
 seed: 873
 
+# use_auth_token: "your_huggingface_token_here"  # Use environment variable HF_TOKEN instead for security
 # Whether to load dataset from wds instead of image/prompt directories
 use_wds_dataset: True
-url_root: "/content/RoentGen-v2/demo_data/demo_webdataset"
+# url_root: "/content/RoentGen-v2/demo_data/demo_webdataset"
+url_root: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/training_data"
 data_filter_file: null
 
 # If use_wds_dataset is False, then use image_dir and prompt_dir
@@ -29,7 +31,7 @@ learning_rate: 1.0e-5
 # train batch size per GPU
 train_batch_size: 4 #48
 max_train_steps: 2 #60000
-output_dir: "/content/RoentGen-v2/outputs"
+output_dir: "outputs"
 
 checkpointing_steps: 1 #500
 resume_from_checkpoint: "latest"

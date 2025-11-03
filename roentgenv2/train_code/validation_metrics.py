@@ -51,9 +51,9 @@ class TextPromptAlignmentMetrics:
             "Cardiomegaly",
             "Edema",
             "Pneumothorax",
-            "Pleural Effusion"
+            "Effusion"
         ]
-
+        print(self.disease_model.pathologies)
         # Get indices for these diseases in XRV model output
         self.disease_indices = [
             list(self.disease_model.pathologies).index(disease)
@@ -61,12 +61,13 @@ class TextPromptAlignmentMetrics:
         ]
 
         # Race classification model
-        self.race_model = xrv.models.DenseNet(weights="densenet121-res224-pc")
+        self.race_model = xrv.baseline_models.emory_hiti.RaceModel()
         self.race_model.to(device)
         self.race_model.eval()
 
         # Age prediction model
-        self.age_model = xrv.models.DenseNet(weights="densenet121-res224-age")
+        # self.age_model = xrv.models.DenseNet(weights="densenet121-res224-age")
+        self.age_model = xrv.baseline_models.riken.AgeModel()
         self.age_model.to(device)
         self.age_model.eval()
 
@@ -75,7 +76,7 @@ class TextPromptAlignmentMetrics:
 
         # Transform for XRV models (expects 224x224)
         self.transform = transforms.Compose([
-            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.AREA),
+            transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BOX),
             transforms.Normalize(mean=[0.5], std=[0.5])  # XRV expects normalized images
         ])
 
@@ -87,10 +88,10 @@ class TextPromptAlignmentMetrics:
             checkpoint_path: Path to sex model checkpoint
         """
         from roentgenv2.inference_code.sex_model import SexModelResNet
+        self.sex_model = SexModelResNet.load_from_checkpoint(checkpoint_path, num_classes=2)
 
-        self.sex_model = SexModelResNet()
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.sex_model.load_state_dict(checkpoint["model_state_dict"])
+        # checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        # self.sex_model.load_from_checkpoint(checkpoint_path)
         self.sex_model.to(self.device)
         self.sex_model.eval()
 
