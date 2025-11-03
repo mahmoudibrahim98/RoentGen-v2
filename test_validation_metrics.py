@@ -24,21 +24,21 @@ def test_text_alignment_metrics():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     metrics = TextPromptAlignmentMetrics(device=device)
 
-    # Create dummy data
+    # Create dummy data on the correct device
     batch_size = 10
-    synthetic_images = torch.randn(batch_size, 1, 512, 512)
+    synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
     # Disease labels (5 diseases)
-    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32)
+    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32).to(device)
 
     # Sex labels (0=M, 1=F)
-    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long)
+    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long).to(device)
 
     # Race labels (0-3)
-    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long)
+    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long).to(device)
 
     # Age labels (18-90 years)
-    age_labels = torch.rand(batch_size) * 72 + 18
+    age_labels = (torch.rand(batch_size) * 72 + 18).to(device)
 
     print("\n1. Testing disease AUROC computation...")
     try:
@@ -86,10 +86,10 @@ def test_similarity_metrics():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     metrics = RealSyntheticSimilarityMetrics(device=device)
 
-    # Create dummy data
+    # Create dummy data on the correct device
     batch_size = 10
-    real_images = torch.randn(batch_size, 1, 512, 512)
-    synthetic_images = torch.randn(batch_size, 1, 512, 512)
+    real_images = torch.randn(batch_size, 1, 512, 512).to(device)
+    synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
     print("\n1. Testing FID computation...")
     try:
@@ -132,7 +132,7 @@ def test_diversity_metrics():
     num_prompts = 5
     images_per_prompt = 4
     images_list = [
-        torch.randn(images_per_prompt, 1, 512, 512)
+        torch.randn(images_per_prompt, 1, 512, 512).to(device)
         for _ in range(num_prompts)
     ]
 
@@ -165,19 +165,19 @@ def test_validation_runner():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     runner = ValidationMetricsRunner(device=device)
 
-    # Create dummy data
+    # Create dummy data on the correct device
     batch_size = 10
-    real_images = torch.randn(batch_size, 1, 512, 512)
-    synthetic_images = torch.randn(batch_size, 1, 512, 512)
+    real_images = torch.randn(batch_size, 1, 512, 512).to(device)
+    synthetic_images = torch.randn(batch_size, 1, 512, 512).to(device)
 
-    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32)
-    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long)
-    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long)
-    age_labels = torch.rand(batch_size) * 72 + 18
+    disease_labels = torch.randint(0, 2, (batch_size, 5), dtype=torch.float32).to(device)
+    sex_labels = torch.randint(0, 2, (batch_size,), dtype=torch.long).to(device)
+    race_labels = torch.randint(0, 4, (batch_size,), dtype=torch.long).to(device)
+    age_labels = (torch.rand(batch_size) * 72 + 18).to(device)
 
     # Create images per prompt for diversity metrics
     images_per_prompt = [
-        torch.randn(4, 1, 512, 512)
+        torch.randn(4, 1, 512, 512).to(device)
         for _ in range(batch_size)
     ]
 
