@@ -3,8 +3,17 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 import shutil
+import pandas as pd
+import numpy as np
+from typing import Optional
+from pathlib import Path
+import warnings
+import json
+from accelerate import PartialState
 
 
+# Validation has been moved to a separate script: run_validation_monitor.py
+# The run_validation_pass function has been removed from here.
 def train_loop(
     logger,
     args,
@@ -46,11 +55,17 @@ def train_loop(
             with accelerator.accumulate(unet):
                 # Convert images to latent space
                 if args.image_type == "pt":
-                    latents = vae.encode(
-                        batch["pixel_values"].to(dtype=weight_dtype)
-                    ).latent_dist.sample()
-                    # Legacy fudge factor from original dreambooth code
-                    latents = latents * 0.18215  # vae.config.scaling_factor
+                    # VAE is frozen, so set to eval mode to save memory (no dropout, no batch norm updates)
+                    vae.eval()
+                    with torch.no_grad():  # No gradients needed for VAE encoding
+                        # VAE runs in fp32 for numerical stability, accepts fp32 input
+                        latents = vae.encode(
+                            batch["pixel_values"].to(dtype=torch.float32)
+                        ).latent_dist.sample()
+                        # Legacy fudge factor from original dreambooth code
+                        latents = latents * 0.18215  # vae.config.scaling_factor
+                    # Cast latents to weight_dtype for UNet (this is the only dtype conversion needed)
+                    latents = latents.to(dtype=weight_dtype)
                 elif args.image_type == "parameters":
                     latents = batch["pixel_values"].to(dtype=weight_dtype)
                 else:
@@ -88,9 +103,11 @@ def train_loop(
                 # === HCN: Hierarchical Conditioning ===
                 kl_loss = None
                 comp_loss = None
+                aux_loss = None
+                hcn_ctx_norm = None
                 if hcn is not None:
                     # Get HCN demographic context
-                    hcn_ctx, mu, logsigma = hcn(
+                    hcn_ctx, mu, logsigma, aux_logits = hcn(
                         batch["age_idx"],
                         batch["sex_idx"],
                         batch["race_idx"],
@@ -101,6 +118,8 @@ def train_loop(
                         [encoder_hidden_states, hcn_ctx], dim=1
                     )  # [B, 78, d_ctx] = 77 text tokens + 1 demographic token
 
+                    hcn_ctx_norm = hcn_ctx.norm(dim=-1).mean()
+
                     # Compute KL divergence loss (uncertainty regularization)
                     # KL(N(mu, sigma) || N(0, 1))
                     kl_loss = -0.5 * torch.sum(
@@ -109,11 +128,20 @@ def train_loop(
                     ).mean()
 
                     # Compute compositional consistency loss
-                    comp_loss = hcn.compute_compositional_loss(
+                    # Unwrap hcn from DDP if needed to access custom methods
+                    hcn_unwrapped = accelerator.unwrap_model(hcn)
+                    comp_loss = hcn_unwrapped.compute_compositional_loss(
                         batch["age_idx"],
                         batch["sex_idx"],
                         batch["race_idx"],
                     )
+
+                    # Auxiliary demographic classification losses
+                    if aux_logits is not None:
+                        age_ce = F.cross_entropy(aux_logits["age"], batch["age_idx"])
+                        sex_ce = F.cross_entropy(aux_logits["sex"], batch["sex_idx"])
+                        race_ce = F.cross_entropy(aux_logits["race"], batch["race_idx"])
+                        aux_loss = (age_ce + sex_ce + race_ce) / 3.0
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -149,6 +177,9 @@ def train_loop(
                 if comp_loss is not None:
                     loss = loss + args.hcn_comp_weight * comp_loss
 
+                if aux_loss is not None and args.hcn_aux_weight > 0:
+                    loss = loss + args.hcn_aux_weight * aux_loss
+
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     params_to_clip = (
@@ -177,33 +208,42 @@ def train_loop(
                     if global_step % args.checkpointing_steps == 0:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [
-                                d for d in checkpoints if d.startswith("checkpoint")
-                            ]
-                            checkpoints = sorted(
-                                checkpoints, key=lambda x: int(x.split("-")[1])
-                            )
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = (
-                                    len(checkpoints) - args.checkpoints_total_limit + 1
+                            # Convert to int in case it was loaded as string from YAML
+                            try:
+                                checkpoints_total_limit = int(args.checkpoints_total_limit)
+                            except (ValueError, TypeError):
+                                logger.warning(f"Invalid checkpoints_total_limit value: {args.checkpoints_total_limit}. Skipping checkpoint cleanup.")
+                                checkpoints_total_limit = None
+                            
+                            # Only proceed with cleanup if we have a valid limit
+                            if checkpoints_total_limit is not None:
+                                checkpoints = os.listdir(args.output_dir)
+                                checkpoints = [
+                                    d for d in checkpoints if d.startswith("checkpoint")
+                                ]
+                                checkpoints = sorted(
+                                    checkpoints, key=lambda x: int(x.split("-")[1])
                                 )
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(
-                                    f"removing checkpoints: {', '.join(removing_checkpoints)}"
-                                )
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(
-                                        args.output_dir, removing_checkpoint
+                                
+                                # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                                if len(checkpoints) >= checkpoints_total_limit:
+                                    num_to_remove = (
+                                        len(checkpoints) - checkpoints_total_limit + 1
                                     )
-                                    shutil.rmtree(removing_checkpoint)
+                                    removing_checkpoints = checkpoints[0:num_to_remove]
+
+                                    logger.info(
+                                        f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                                    )
+                                    logger.info(
+                                        f"removing checkpoints: {', '.join(removing_checkpoints)}"
+                                    )
+
+                                    for removing_checkpoint in removing_checkpoints:
+                                        removing_checkpoint = os.path.join(
+                                            args.output_dir, removing_checkpoint
+                                        )
+                                        shutil.rmtree(removing_checkpoint)
 
                         save_path = os.path.join(
                             args.output_dir, f"checkpoint-{global_step}"
@@ -211,7 +251,8 @@ def train_loop(
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-                # TODO: add validation pass
+                # Note: Validation has been moved to a separate script (run_validation_monitor.py)
+                # It monitors this directory and automatically validates new checkpoints
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
 
@@ -221,6 +262,10 @@ def train_loop(
                 logs["kl_weight"] = kl_weight
             if comp_loss is not None:
                 logs["comp_loss"] = comp_loss.detach().item()
+            if aux_loss is not None:
+                logs["aux_loss"] = aux_loss.detach().item()
+            if hcn_ctx_norm is not None:
+                logs["hcn_ctx_norm"] = hcn_ctx_norm.detach().item()
 
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)

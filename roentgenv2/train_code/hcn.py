@@ -152,6 +152,20 @@ class HierarchicalConditioner(nn.Module):
             nn.Linear(d_node, d_ctx),
         )
 
+        # === Auxiliary demographic classifiers (for diagnostic losses) ===
+        self.age_classifier = nn.Sequential(
+            nn.LayerNorm(d_node),
+            nn.Linear(d_node, num_age_bins),
+        )
+        self.sex_classifier = nn.Sequential(
+            nn.LayerNorm(d_node),
+            nn.Linear(d_node, num_sex),
+        )
+        self.race_classifier = nn.Sequential(
+            nn.LayerNorm(d_node),
+            nn.Linear(d_node, num_race),
+        )
+
         self._init_weights()
 
     def _init_weights(self):
@@ -171,7 +185,7 @@ class HierarchicalConditioner(nn.Module):
         age_idx: torch.Tensor,
         sex_idx: torch.Tensor,
         race_idx: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         """
         Forward pass through hierarchical conditioning network.
 
@@ -223,7 +237,14 @@ class HierarchicalConditioner(nn.Module):
         # === Project to context dimension and add sequence axis ===
         ctx = self.proj_ctx(z).unsqueeze(1)  # [B, 1, d_ctx]
 
-        return ctx, mu, logsigma
+        # === Auxiliary logits (use mu which is deterministic at inference) ===
+        aux_logits = {
+            "age": self.age_classifier(mu),
+            "sex": self.sex_classifier(mu),
+            "race": self.race_classifier(mu),
+        }
+
+        return ctx, mu, logsigma, aux_logits
 
     def compute_compositional_loss(
         self,
@@ -350,11 +371,12 @@ def test_hcn():
     race = torch.randint(0, 4, (batch_size,))
 
     hcn.train()
-    ctx, mu, logsigma = hcn(age, sex, race)
+    ctx, mu, logsigma, aux_logits = hcn(age, sex, race)
 
     assert ctx.shape == (batch_size, 1, 1024), f"Expected (8, 1, 1024), got {ctx.shape}"
     assert mu.shape == (batch_size, 256), f"Expected (8, 256), got {mu.shape}"
     assert logsigma.shape == (batch_size, 256), f"Expected (8, 256), got {logsigma.shape}"
+    assert all(k in aux_logits for k in ("age", "sex", "race"))
 
     print(f"✓ Forward pass: ctx shape = {ctx.shape}")
 
@@ -375,7 +397,7 @@ def test_hcn():
     try:
         hcn.save_pretrained(temp_dir)
         hcn_loaded = HierarchicalConditioner.from_pretrained(temp_dir)
-        ctx_loaded, _, _ = hcn_loaded(age, sex, race)
+        ctx_loaded, _, _, _ = hcn_loaded(age, sex, race)
         print(f"✓ Save/load successful")
     finally:
         shutil.rmtree(temp_dir)

@@ -19,6 +19,7 @@ from transformers import (
     CLIPTextModel,
     CLIPFeatureExtractor,
 )
+from huggingface_hub.errors import RepositoryNotFoundError
 
 from diffusers.utils.import_utils import is_xformers_available
 
@@ -103,6 +104,7 @@ def load_models(args, accelerator, logger):
         )
 
     # Load the tokenizer
+    # Handle potential 404 error when transformers tries to check for chat templates
     tokenizer_model_max_length = (
         args.enforce_tokenizer_max_sentence_length
         if args.enforce_tokenizer_max_sentence_length is not None
@@ -112,21 +114,55 @@ def load_models(args, accelerator, logger):
             else None
         )
     )
-    if tokenizer_subfolder_to_use is not None:
-        tokenizer = tokenizer_class.from_pretrained(
-            text_encoder_name,
-            model_max_length=tokenizer_model_max_length,
-            subfolder=tokenizer_subfolder_to_use,
-            trust_remote_code=True,
-            **kwargs_from_pretrained,
-        )
-    else:
-        tokenizer = tokenizer_class.from_pretrained(
-            text_encoder_name,
-            model_max_length=tokenizer_model_max_length,
-            trust_remote_code=True,
-            **kwargs_from_pretrained,
-        )
+    try:
+        if tokenizer_subfolder_to_use is not None:
+            tokenizer = tokenizer_class.from_pretrained(
+                text_encoder_name,
+                model_max_length=tokenizer_model_max_length,
+                subfolder=tokenizer_subfolder_to_use,
+                trust_remote_code=True,
+                **kwargs_from_pretrained,
+            )
+        else:
+            tokenizer = tokenizer_class.from_pretrained(
+                text_encoder_name,
+                model_max_length=tokenizer_model_max_length,
+                trust_remote_code=True,
+                **kwargs_from_pretrained,
+            )
+    except (RepositoryNotFoundError, Exception) as e:
+        # If there's an error (e.g., 404 for chat templates), try with local_files_only
+        if isinstance(e, RepositoryNotFoundError) or "404" in str(e) or "RepositoryNotFoundError" in str(type(e)):
+            logger.warning(f"Got repository error when loading tokenizer, trying with local cache: {e}")
+            try:
+                if tokenizer_subfolder_to_use is not None:
+                    tokenizer = tokenizer_class.from_pretrained(
+                        text_encoder_name,
+                        model_max_length=tokenizer_model_max_length,
+                        subfolder=tokenizer_subfolder_to_use,
+                        trust_remote_code=True,
+                        local_files_only=True,
+                        **kwargs_from_pretrained,
+                    )
+                else:
+                    tokenizer = tokenizer_class.from_pretrained(
+                        text_encoder_name,
+                        model_max_length=tokenizer_model_max_length,
+                        trust_remote_code=True,
+                        local_files_only=True,
+                        **kwargs_from_pretrained,
+                    )
+            except Exception as e2:
+                # If that fails, try without subfolder (fallback)
+                logger.warning(f"Local files only failed, trying alternative loading: {e2}")
+                tokenizer = tokenizer_class.from_pretrained(
+                    text_encoder_name,
+                    model_max_length=tokenizer_model_max_length,
+                    trust_remote_code=True,
+                    **kwargs_from_pretrained,
+                )
+        else:
+            raise
 
     # Load the vae
     if args.image_type == "pt":

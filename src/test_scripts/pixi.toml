@@ -1,0 +1,10 @@
+[workspace]
+authors = ["mahmoudibrahim98 <mahmoud_ibrahim98@outlook.com>"]
+channels = ["conda-forge"]
+name = "test_scripts"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]

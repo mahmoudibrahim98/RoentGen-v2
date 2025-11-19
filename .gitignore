@@ -82,3 +82,41 @@ pretrained_models/
 
 # Wandb
 wandb/
+
+# data
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+*.svg
+*.eps
+*.pdf
+*.docx
+*.txt
+*.csv
+*.json
+*.completed
+*.tar
+*.err
+*.out
+*.jsonl
+
+# model files
+*.pth
+*.pt
+*.pkl
+*.ckpt
+*.pt
+*.pkl
+*.ckpt
+*.pt
+*.pkl
+*.ckpt
+*.safetensors
+*.bin
+*.md
+config.yaml

@@ -128,7 +128,7 @@ class SquarePad:
 
 #####################################################
 class RGFineTuningWebDataset(IterableDataset):
-    def __init__(self, url_list, tokenizer, data_filter_file=None, use_hcn=False):
+    def __init__(self, url_list, tokenizer, data_filter_file=None, use_hcn=False, include_text=False):
         # self.webdataset = wds.WebDataset(url_list).shuffle(1024)
         self.url_list = url_list
         self.webdataset = wds.DataPipeline(
@@ -159,6 +159,7 @@ class RGFineTuningWebDataset(IterableDataset):
 
         self.tokenizer = tokenizer
         self.use_hcn = use_hcn
+        self.include_text = include_text  # Only include text field for validation (not training)
 
         if use_hcn:
             print("HCN mode enabled: parsing demographics from prompts")
@@ -177,6 +178,8 @@ class RGFineTuningWebDataset(IterableDataset):
             return ds_size
 
     def wds_item_to_sample(self, item):
+        import json
+        
         sample = {}
 
         sample["pixel_values"] = (
@@ -187,36 +190,59 @@ class RGFineTuningWebDataset(IterableDataset):
         # Parse full prompt
         prompt = item["prompt_metadata"].decode("utf-8")
 
+        # Check if validation metadata is present (for validation datasets)
+        if "validation_metadata" in item:
+            try:
+                validation_metadata = json.loads(item["validation_metadata"].decode("utf-8"))
+                
+                # Add disease labels if present
+                if "disease_labels" in validation_metadata:
+                    sample["disease_labels"] = torch.tensor(
+                        validation_metadata["disease_labels"], 
+                        dtype=torch.float32
+                    )
+                
+                # Add demographics if present
+                if "age" in validation_metadata:
+                    sample["age"] = torch.tensor(validation_metadata["age"], dtype=torch.float32)
+                if "sex_idx" in validation_metadata:
+                    sample["sex_idx"] = torch.tensor(validation_metadata["sex_idx"], dtype=torch.long)
+                if "race_idx" in validation_metadata:
+                    sample["race_idx"] = torch.tensor(validation_metadata["race_idx"], dtype=torch.long)
+                if "age_bin" in validation_metadata:
+                    sample["age_idx"] = torch.tensor(validation_metadata["age_bin"], dtype=torch.long)
+                
+            except Exception as e:
+                print(f"Warning: Could not parse validation_metadata: {e}")
+
         if self.use_hcn:
             # Extract demographics as categorical indices
-            sample["age_idx"] = torch.tensor(parse_age_bin(prompt), dtype=torch.long)
-            sample["sex_idx"] = torch.tensor(parse_sex(prompt), dtype=torch.long)
-            sample["race_idx"] = torch.tensor(parse_race(prompt), dtype=torch.long)
+            # Use metadata if available, otherwise parse from prompt
+            if "age_idx" not in sample:
+                sample["age_idx"] = torch.tensor(parse_age_bin(prompt), dtype=torch.long)
+            if "sex_idx" not in sample:
+                sample["sex_idx"] = torch.tensor(parse_sex(prompt), dtype=torch.long)
+            if "race_idx" not in sample:
+                sample["race_idx"] = torch.tensor(parse_race(prompt), dtype=torch.long)
 
-            # Extract clinical text only (remove demographics)
-            clinical_text = extract_clinical_text(prompt)
-
-            # Tokenize clinical text only
-            prompt_tokenized = self.tokenizer(
-                clinical_text,
-                padding="max_length",
-                truncation=True,
-                max_length=self.tokenizer.model_max_length,
-                return_tensors="pt",
-            )
-        else:
-            # Use full prompt (original behavior)
-            prompt_tokenized = self.tokenizer(
-                prompt,
-                padding="max_length",
-                truncation=True,
-                max_length=self.tokenizer.model_max_length,
-                return_tensors="pt",
-            )
+        # Always tokenize the full prompt (retain demographics for text encoder)
+        prompt_tokenized = self.tokenizer(
+            prompt,
+            padding="max_length",
+            truncation=True,
+            max_length=self.tokenizer.model_max_length,
+            return_tensors="pt",
+        )
 
         sample["input_ids"] = prompt_tokenized.input_ids.squeeze()
         sample["attention_mask"] = prompt_tokenized.attention_mask.squeeze()
         sample["loss_weights"] = torch.FloatTensor([1.0]).squeeze()
+        
+        # Store full prompt text for validation (needed for image generation)
+        # Only include if explicitly requested (for validation datasets)
+        # Training datasets should NOT include this to avoid Accelerate concatenation errors
+        if self.include_text:
+            sample["text"] = prompt
 
         return sample
 
@@ -251,11 +277,12 @@ class RGFineTuningImageDirectoryDataset(Dataset):
                                           Defaults to None, meaning no filter is applied.
         use_hcn (bool): Whether to use HCN mode (parse demographics)
     """
-    def __init__(self, image_dir_path, text_dir_path, tokenizer, data_filter_file=None, use_hcn=False):
+    def __init__(self, image_dir_path, text_dir_path, tokenizer, data_filter_file=None, use_hcn=False, include_text=False):
         self.image_dir_path = image_dir_path
         self.text_dir_path = text_dir_path
         self.tokenizer = tokenizer
         self.use_hcn = use_hcn
+        self.include_text = include_text  # Only include text field for validation (not training)
 
         # Initialize image transformations
         self.image_transforms = Compose(
@@ -340,32 +367,26 @@ class RGFineTuningImageDirectoryDataset(Dataset):
             sample["sex_idx"] = torch.tensor(parse_sex(prompt), dtype=torch.long)
             sample["race_idx"] = torch.tensor(parse_race(prompt), dtype=torch.long)
 
-            # Extract clinical text only (remove demographics)
-            clinical_text = extract_clinical_text(prompt)
-
-            # Tokenize clinical text only
-            prompt_tokenized = self.tokenizer(
-                clinical_text,
-                padding="max_length",
-                truncation=True,
-                max_length=self.tokenizer.model_max_length,
-                return_tensors="pt",
-            )
-        else:
-            # Use full prompt (original behavior)
-            prompt_tokenized = self.tokenizer(
-                prompt,
-                padding="max_length",
-                truncation=True,
-                max_length=self.tokenizer.model_max_length,
-                return_tensors="pt",
-            )
+        # Always use the full prompt for tokenization (retain demographic text)
+        prompt_tokenized = self.tokenizer(
+            prompt,
+            padding="max_length",
+            truncation=True,
+            max_length=self.tokenizer.model_max_length,
+            return_tensors="pt",
+        )
 
         sample["input_ids"] = prompt_tokenized.input_ids.squeeze()
         sample["attention_mask"] = prompt_tokenized.attention_mask.squeeze()
 
         # 3. Add loss weights (as in the original WebDataset class)
         sample["loss_weights"] = torch.FloatTensor([1.0]).squeeze()
+        
+        # Store full prompt text for validation (needed for image generation)
+        # Only include if explicitly requested (for validation datasets)
+        # Training datasets should NOT include this to avoid Accelerate concatenation errors
+        if self.include_text:
+            sample["text"] = prompt
 
         # Optionally, include the image_stem for debugging or external use
         # sample["image_stem"] = image_stem

@@ -1,0 +1,84 @@
+# RoentGen-v2 Training Configuration  with Validation
+#
+# ==============================================================================
+# MODEL CONFIGURATION
+# ==============================================================================
+
+pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base" #Pretrained model to start from
+pretrained_text_encoder_name_or_path: null #Pretrained text encoder to start from
+train_text_encoder: True #Whether to train the text encoder
+
+embedding_method: "last_hidden_state" #Embedding method for text conditioning
+enforce_tokenizer_max_sentence_length: 77 #Enforce tokenizer max sentence length
+output_dir: "./output/roentgen_v2_baseline" #Output directory for checkpoints and logs
+seed: 42 #Random seed for reproducibility
+resolution: 512 #Image resolution (512 for SD 2.1)
+
+train_batch_size: 16 #Batch size per GPU # adapt 48
+max_train_steps: 60000  #Total training steps # adapt 60000
+learning_rate: 1.0e-5 #Learning rate
+gradient_accumulation_steps: 1 #Gradient accumulation
+mixed_precision: "bf16" #Mixed precision training (fp16, bf16, or no)
+use_ema: true #Use EMA (Exponential Moving Average) for the UNet
+lr_scheduler: "cosine" #Learning rate scheduler
+lr_warmup_steps: 500
+gradient_checkpointing: true #Gradient checkpointing (saves memory at cost of speed) - REQUIRED for large batch sizes with text encoder training
+
+# ==============================================================================
+# DATASET CONFIGURATION
+# ==============================================================================
+
+# Use WebDataset format (set to false for directory-based dataset)
+use_wds_dataset: true #Use WebDataset format (set to false for directory-based dataset)
+url_root: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data_not_summarized/training_data" #Path to WebDataset tar files (if use_wds_dataset=true)
+image_type: "pt" #Type of image data ("pt" for pre-encoded latents, or image format)
+
+# ==============================================================================
+# CHECKPOINTING
+# ==============================================================================
+
+checkpointing_steps: 2500 #Save checkpoint every N steps # adapt  500
+checkpoints_total_limit: None #Maximum number of checkpoints to keep (older ones are deleted)
+resume_from_checkpoint: "latest" #Resume training from checkpoint (use "latest" or path to checkpoint dir)
+
+# ==============================================================================
+# HCN (HIERARCHICAL CONDITIONER NETWORK)
+# ==============================================================================
+# Enable HCN for compositional demographic conditioning
+use_hcn: false #Enable HCN for compositional demographic conditioning
+hcn_d_node: 256 #HCN hidden dimension
+hcn_d_ctx: 1024 #HCN output dimension (should match text encoder output)
+hcn_dropout: 0.1 #HCN dropout
+hcn_use_uncertainty: true #Use uncertainty quantification in HCN
+# Number of categories for each demographic attribute
+hcn_num_age_bins: 5
+hcn_num_sex: 2
+hcn_num_race: 4
+
+# Loss weights for HCN
+hcn_kl_weight: 0.001
+hcn_kl_anneal_steps: 10000
+hcn_comp_weight: 0.01
+
+# ==============================================================================
+# VALIDATION CONFIGURATION
+# ==============================================================================
+
+run_validation: true #Enable validation during training
+validation_steps: 2500 #Run validation every N steps # adapt 2500
+num_validation_samples: -1 #Number of validation samples to use per validation pass
+val_batch_size: 8 #Batch size for validation generation (number of images generated in parallel)
+validation_csv: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data_not_summarized/val_data" #Path to validation data
+validation_images_dir: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data_not_summarized/val_data" #Path to real validation images directory
+validation_sex_model_path: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/pretrained_models/sex/resnet-all/epoch=13-step=7125.ckpt" #Path to sex prediction model checkpoint (optional)
+validation_num_images_per_prompt: 1 #Generation parameters for validation
+validation_guidance_scale: 7.5 #Generation parameters for validation
+validation_num_inference_steps: 75 #Generation parameters for validation
+validation_save_images: true #Whether to save generated validation images
+validation_metrics_batch_size: 8 #Batch size for validation metrics computation
+compute_subgroup_metrics: true #Enable subgroup metrics (FID, MS-SSIM, BioViL per sex/race/age and intersectional subgroups). Warning: This significantly increases computation time.
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+logging_dir: "logs" #Logging directory
+report_to: "wandb" #Where to report logs (wandb, tensorboard, or none)

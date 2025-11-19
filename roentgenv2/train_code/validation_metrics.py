@@ -23,6 +23,10 @@ from torchvision import transforms
 from skimage.metrics import structural_similarity as ssim
 import warnings
 from pathlib import Path
+import sys
+# Add project root to Python path
+project_root = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 
 class TextPromptAlignmentMetrics:
@@ -41,6 +45,7 @@ class TextPromptAlignmentMetrics:
         self.device = device
 
         # Disease classification model (DenseNet-121)
+        # Note: Expects 224×224 grayscale (1 channel) images
         self.disease_model = xrv.models.DenseNet(weights="densenet121-res224-all")
         self.disease_model.to(device)
         self.disease_model.eval()
@@ -61,18 +66,24 @@ class TextPromptAlignmentMetrics:
         ]
 
         # Race classification model
+        # Note: Expects 320×320 grayscale (1 channel) images
         self.race_model = xrv.baseline_models.emory_hiti.RaceModel()
         self.race_model.to(device)
         self.race_model.eval()
 
         # Age prediction model
+        # Note: Expects 320×320 grayscale (1 channel) images
         # self.age_model = xrv.models.DenseNet(weights="densenet121-res224-age")
         self.age_model = xrv.baseline_models.riken.AgeModel()
         self.age_model.to(device)
         self.age_model.eval()
 
-        # Sex prediction model (will be loaded separately using custom implementation)
-        self.sex_model = None
+        # Sex prediction model (MIRA model from torchxrayvision)
+        # Note: Expects 224×224 grayscale (1 channel) images in HU range
+        # Load MIRA model by default (doesn't require checkpoint)
+        self.sex_model = xrv.baseline_models.mira.SexModel(weights=True)
+        self.sex_model.to(device)
+        self.sex_model.eval()
 
         # Transform for XRV models (expects 224x224)
         self.transform = transforms.Compose([
@@ -80,36 +91,80 @@ class TextPromptAlignmentMetrics:
             transforms.Normalize(mean=[0.5], std=[0.5])  # XRV expects normalized images
         ])
 
-    def load_sex_model(self, checkpoint_path: str):
+    def load_sex_model(self, checkpoint_path: str = None):
         """
-        Load custom sex prediction model.
+        Load MIRA sex prediction model from torchxrayvision.
+        
+        The MIRA model expects single-channel (grayscale) images in HU range [-1024, 1024],
+        similar to other XRV models. MIRA model is now loaded by default in __init__,
+        but this method is kept for backward compatibility.
 
         Args:
-            checkpoint_path: Path to sex model checkpoint
+            checkpoint_path: Not used for MIRA model (kept for compatibility)
         """
-        from roentgenv2.inference_code.sex_model import SexModelResNet
-        self.sex_model = SexModelResNet.load_from_checkpoint(checkpoint_path, num_classes=2)
+        # MIRA model is already loaded in __init__, but reload if needed
+        if self.sex_model is None:
+            self.sex_model = xrv.baseline_models.mira.SexModel(weights=True)
+            self.sex_model.to(self.device)
+            self.sex_model.eval()
 
-        # checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        # self.sex_model.load_from_checkpoint(checkpoint_path)
-        self.sex_model.to(self.device)
-        self.sex_model.eval()
-
-    def preprocess_images(self, images: torch.Tensor) -> torch.Tensor:
+    def preprocess_images(self, images: torch.Tensor, target_size: int = 224) -> torch.Tensor:
         """
-        Preprocess images for XRV models (512x512 -> 224x224).
+        Preprocess images for XRV models.
+        Converts to grayscale and normalizes to Hounsfield Units range [-1024, 1024] as expected by XRV models.
+        
+        Based on XRV documentation: xrv.datasets.normalize(img, 255) converts 8-bit images to [-1024, 1024] HU range.
 
         Args:
             images: Batch of images [B, C, H, W] in range [0, 1] or [-1, 1]
+            target_size: Target image size (224 for disease model, 320 for race/age models)
 
         Returns:
-            Preprocessed images [B, C, 224, 224]
+            Preprocessed images [B, 1, target_size, target_size] (grayscale) in HU range [-1024, 1024]
         """
         # Normalize to [0, 1] if needed
         if images.min() < 0:
             images = (images + 1.0) / 2.0
 
         # Convert RGB to grayscale if needed
+        if images.shape[1] == 3:
+            images = images.mean(dim=1, keepdim=True)
+
+        # Downsample to target size using area interpolation
+        images = F.interpolate(
+            images,
+            size=(target_size, target_size),
+            mode="area"
+        )
+
+        # Convert to Hounsfield Units range [-1024, 1024] as expected by XRV models
+        # This matches xrv.datasets.normalize(img, 255) behavior:
+        # - Input: [0, 1] normalized image (equivalent to 8-bit [0, 255])
+        # - Output: [-1024, 1024] HU range
+        # Formula from XRV: HU = (img * 255 - 128) * 8
+        # Simplified: HU = img * 2048 - 1024
+        images = images * 2048.0 - 1024.0  # [0, 1] -> [-1024, 1024]
+
+        return images
+
+    def preprocess_images_for_sex_model(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Preprocess images for MIRA sex prediction model (512x512 -> 224x224).
+        
+        The MIRA model expects single-channel (grayscale) images in HU range [-1024, 1024],
+        similar to other XRV models. Uses the same preprocessing as preprocess_images().
+
+        Args:
+            images: Batch of images [B, C, H, W] in range [0, 1] or [-1, 1]
+
+        Returns:
+            Preprocessed images [B, 1, 224, 224] (grayscale) in HU range [-1024, 1024]
+        """
+        # Normalize to [0, 1] if needed
+        if images.min() < 0:
+            images = (images + 1.0) / 2.0
+
+        # Convert RGB to grayscale if needed (MIRA expects single channel)
         if images.shape[1] == 3:
             images = images.mean(dim=1, keepdim=True)
 
@@ -120,8 +175,9 @@ class TextPromptAlignmentMetrics:
             mode="area"
         )
 
-        # Normalize for XRV models
-        images = (images - 0.5) / 0.5
+        # Convert to Hounsfield Units range [-1024, 1024] (same as other XRV models)
+        # [0, 1] -> [-1024, 1024]
+        images = images * 2048.0 - 1024.0
 
         return images
 
@@ -129,40 +185,150 @@ class TextPromptAlignmentMetrics:
     def compute_disease_auroc(
         self,
         synthetic_images: torch.Tensor,
-        disease_labels: torch.Tensor
+        disease_labels: torch.Tensor,
+        batch_size: int = 32
     ) -> Dict[str, float]:
         """
         Compute AUROC for disease classification on synthetic images.
+        
+        Enhanced version that:
+        - Maps 5 tracked diseases to their indices in the 14-label array
+        - Filters out uncertain labels (-1) before computing AUROC
+        - Processes images in batches to avoid OOM
 
         Args:
             synthetic_images: Synthetic images [B, C, H, W]
-            disease_labels: Ground truth disease labels [B, num_diseases]
+            disease_labels: Ground truth disease labels [B, num_diseases] or [B, 14] (14-label array)
+            batch_size: Batch size for processing to avoid OOM
 
         Returns:
             Dictionary of disease name -> AUROC score
         """
-        # Preprocess images
-        images = self.preprocess_images(synthetic_images)
+        all_predictions = []
+        
+        # Process in batches to avoid OOM
+        num_images = len(synthetic_images)
+        for i in range(0, num_images, batch_size):
+            end_i = min(i + batch_size, num_images)
+            batch_images = synthetic_images[i:end_i]
+            
+            # Preprocess images (DenseNet expects 224x224)
+            images = self.preprocess_images(batch_images, target_size=224)
 
-        # Get predictions
-        predictions = self.disease_model(images)
+            # Get predictions
+            batch_predictions = self.disease_model(images)
 
-        # Extract predictions for target diseases
-        predictions = predictions[:, self.disease_indices].cpu().numpy()
+            # Extract predictions for target diseases
+            batch_predictions = batch_predictions[:, self.disease_indices].detach().cpu().numpy()
+            all_predictions.append(batch_predictions)
+            
+            # Clear GPU cache after each batch
+            del images, batch_predictions
+            torch.cuda.empty_cache()
+        
+        # Concatenate all predictions
+        predictions = np.concatenate(all_predictions, axis=0)
         labels = disease_labels.cpu().numpy()
+
+        # Diagnostic logging
+        print(f"[DEBUG] disease_labels shape: {labels.shape}, dtype: {labels.dtype}")
+        print(f"[DEBUG] Labels value range: min={labels.min()}, max={labels.max()}, unique values: {np.unique(labels)}")
+        if labels.shape[1] == 5:
+            print(f"[DEBUG] First 5 samples of 5-label format:\n{labels[:5]}")
+        elif labels.shape[1] == 14:
+            print(f"[DEBUG] First 5 samples of 14-label format:\n{labels[:5]}")
+
+        # Map the 5 tracked diseases to their indices in the 14-label array
+        # DISEASE_COLUMNS order: ['Atelectasis', 'Cardiomegaly', 'Consolidation', 'Edema', 
+        #                         'Enlarged Cardiomediastinum', 'Fracture', 'Lung Lesion', 
+        #                         'Lung Opacity', 'No Finding', 'Pleural Effusion', 
+        #                         'Pleural Other', 'Pneumonia', 'Pneumothorax', 'Support Devices']
+        disease_name_to_14label_index = {
+            "Atelectasis": 0,
+            "Cardiomegaly": 1,
+            "Edema": 3,
+            "Pneumothorax": 12,
+            "Effusion": 9,  # "Pleural Effusion" in the 14-label array
+        }
+
+        # Check if labels are in 14-label format or 5-label format
+        # If shape is [B, 5], assume it's already the 5 tracked diseases
+        # If shape is [B, 14], we need to map to the correct indices
+        if labels.shape[1] == 14:
+            # Labels are in 14-label format - map to correct indices
+            use_14label_format = True
+            print("[DEBUG] Detected 14-label format")
+        elif labels.shape[1] == 5:
+            # Labels are already in 5-label format
+            use_14label_format = False
+            print("[DEBUG] Detected 5-label format")
+        else:
+            # Unknown format - try to use as-is
+            use_14label_format = False
+            print(f"[DEBUG] Unknown label format with shape {labels.shape[1]}, treating as 5-label")
 
         # Compute AUROC for each disease
         aurocs = {}
         for i, disease in enumerate(self.disease_labels):
-            # Skip if all labels are same (undefined AUROC)
-            if len(np.unique(labels[:, i])) < 2:
+            if use_14label_format:
+                # Get the correct index in the 14-label array
+                label_idx = disease_name_to_14label_index.get(disease)
+                if label_idx is None:
+                    aurocs[disease] = np.nan
+                    continue
+                
+                # Get labels from the correct position in 14-label array
+                disease_labels_i = labels[:, label_idx]
+                # Get predictions from the model (which outputs 5 diseases)
+                disease_preds_i = predictions[:, i]
+                
+                # Filter out samples with uncertain labels (-1)
+                # Only keep samples where label is 0 or 1
+                valid_mask = (disease_labels_i == 0) | (disease_labels_i == 1)
+                valid_labels = disease_labels_i[valid_mask]
+                valid_preds = disease_preds_i[valid_mask]
+            else:
+                # Labels are already in 5-label format
+                disease_labels_i = labels[:, i]
+                disease_preds_i = predictions[:, i]
+                
+                # Filter out samples with uncertain labels (-1)
+                valid_mask = (disease_labels_i == 0) | (disease_labels_i == 1)
+                valid_labels = disease_labels_i[valid_mask]
+                valid_preds = disease_preds_i[valid_mask]
+
+            # Diagnostic logging for Atelectasis
+            if disease == "Atelectasis":
+                print(f"[DEBUG Atelectasis] label_idx={i if not use_14label_format else label_idx}, "
+                      f"total_samples={len(disease_labels_i)}, "
+                      f"valid_samples={len(valid_labels)}, "
+                      f"unique_labels={np.unique(valid_labels) if len(valid_labels) > 0 else 'N/A'}, "
+                      f"label_distribution: 0={np.sum(disease_labels_i == 0)}, 1={np.sum(disease_labels_i == 1)}, -1={np.sum(disease_labels_i == -1)}")
+
+            # Check if we have both classes (0 and 1) after filtering
+            unique_labels = np.unique(valid_labels)
+            if len(unique_labels) < 2 or len(valid_labels) == 0:
                 aurocs[disease] = np.nan
+                if disease == "Atelectasis":
+                    print(f"[DEBUG Atelectasis] Returning NaN - unique_labels={unique_labels}, valid_labels count={len(valid_labels)}")
                 continue
 
+            # Check for minimum samples per class for reliable AUROC
+            # AUROC becomes unreliable with < 10 samples in the minority class
+            class_counts = {label: np.sum(valid_labels == label) for label in unique_labels}
+            min_class_count = min(class_counts.values())
+            if min_class_count < 10:
+                print(f"[WARNING] {disease}: Only {min_class_count} samples in minority class (class_counts: {class_counts}). "
+                      f"AUROC may be unreliable. Consider filtering or using a different metric.")
+
             try:
-                aurocs[disease] = roc_auc_score(labels[:, i], predictions[:, i])
-            except ValueError:
+                aurocs[disease] = roc_auc_score(valid_labels, valid_preds)
+                if disease == "Atelectasis":
+                    print(f"[DEBUG Atelectasis] AUROC={aurocs[disease]:.4f} (class_counts: {class_counts})")
+            except ValueError as e:
                 aurocs[disease] = np.nan
+                if disease == "Atelectasis":
+                    print(f"[DEBUG Atelectasis] ValueError in roc_auc_score: {e}")
 
         # Compute mean AUROC
         valid_aurocs = [v for v in aurocs.values() if not np.isnan(v)]
@@ -174,14 +340,21 @@ class TextPromptAlignmentMetrics:
     def compute_sex_accuracy(
         self,
         synthetic_images: torch.Tensor,
-        sex_labels: torch.Tensor
+        sex_labels: torch.Tensor,
+        batch_size: int = 32
     ) -> float:
         """
         Compute sex classification accuracy.
+        
+        Enhanced version that:
+        - Uses softmax before argmax for 2-class classification (more stable)
+        - Filters out invalid labels (-1) before computing accuracy
+        - Processes images in batches to avoid OOM
 
         Args:
             synthetic_images: Synthetic images [B, C, H, W]
-            sex_labels: Ground truth sex labels [B] (0=M, 1=F)
+            sex_labels: Ground truth sex labels [B] (0=M, 1=F, -1=invalid)
+            batch_size: Batch size for processing to avoid OOM
 
         Returns:
             Sex classification accuracy
@@ -190,13 +363,58 @@ class TextPromptAlignmentMetrics:
             warnings.warn("Sex model not loaded. Call load_sex_model() first.")
             return np.nan
 
-        # Preprocess images
-        images = self.preprocess_images(synthetic_images)
+        all_predicted_labels = []
+        all_true_labels = []
+        
+        # Process in batches to avoid OOM
+        num_images = len(synthetic_images)
+        for i in range(0, num_images, batch_size):
+            end_i = min(i + batch_size, num_images)
+            batch_images = synthetic_images[i:end_i]
+            batch_labels = sex_labels[i:end_i]
+            
+            # Preprocess images for sex model (MIRA expects grayscale/1 channel in HU range)
+            images = self.preprocess_images_for_sex_model(batch_images)
 
-        # Get predictions
-        predictions = self.sex_model(images)
-        predicted_labels = (predictions > 0.5).long().cpu().numpy()
-        true_labels = sex_labels.cpu().numpy()
+            # Get predictions
+            raw_predictions = self.sex_model(images).detach()
+            
+            # Handle different output shapes from sex model
+            # Sex models can output: [B, 2] (two-class), [B, 1] (sigmoid), or [B] (flat)
+            if raw_predictions.dim() > 1:
+                if raw_predictions.shape[1] == 2:
+                    # Two-class classification: [B, 2] logits
+                    # Apply softmax to convert logits to probabilities, then take argmax
+                    # This matches the approach in calculate_metrics_on_real_data.py
+                    probs = torch.softmax(raw_predictions, dim=1)
+                    predicted_labels = torch.argmax(probs, dim=1).cpu().numpy()
+                else:
+                    # Single sigmoid output: [B, 1] or [B]
+                    predicted_labels = (raw_predictions.squeeze() > 0.5).long().cpu().numpy()
+            else:
+                # Already 1D
+                predicted_labels = (raw_predictions > 0.5).long().cpu().numpy()
+            
+            all_predicted_labels.append(predicted_labels.flatten())
+            all_true_labels.append(batch_labels.cpu().numpy().flatten())
+            
+            # Clear GPU cache after each batch
+            del images, raw_predictions
+            torch.cuda.empty_cache()
+        
+        # Concatenate all predictions and labels
+        predicted_labels = np.concatenate(all_predicted_labels, axis=0)
+        true_labels = np.concatenate(all_true_labels, axis=0)
+        
+        # Filter out invalid labels (-1) if any
+        valid_mask = true_labels >= 0
+        if np.sum(valid_mask) < len(true_labels):
+            # Some labels are invalid - filter them out
+            true_labels = true_labels[valid_mask]
+            predicted_labels = predicted_labels[valid_mask]
+        
+        if len(true_labels) == 0:
+            return np.nan
 
         return accuracy_score(true_labels, predicted_labels)
 
@@ -204,25 +422,90 @@ class TextPromptAlignmentMetrics:
     def compute_race_accuracy(
         self,
         synthetic_images: torch.Tensor,
-        race_labels: torch.Tensor
+        race_labels: torch.Tensor,
+        batch_size: int = 32
     ) -> float:
         """
         Compute race classification accuracy using XRV model.
+        
+        Enhanced version that:
+        - Maps model output indices to dataset label indices
+        - Filters out Hispanic (3) and invalid labels (-1) before computing accuracy
+        - Processes images in batches to avoid OOM
 
         Args:
             synthetic_images: Synthetic images [B, C, H, W]
-            race_labels: Ground truth race labels [B] (0=White, 1=Black, 2=Asian, 3=Hispanic)
+            race_labels: Ground truth race labels [B] (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            batch_size: Batch size for processing to avoid OOM
 
         Returns:
             Race classification accuracy
         """
-        # Preprocess images
-        images = self.preprocess_images(synthetic_images)
+        all_predicted_labels = []
+        all_true_labels = []
+        
+        # Process in batches to avoid OOM
+        num_images = len(synthetic_images)
+        for i in range(0, num_images, batch_size):
+            end_i = min(i + batch_size, num_images)
+            batch_images = synthetic_images[i:end_i]
+            batch_labels = race_labels[i:end_i]
+            
+            # Preprocess images (RaceModel expects 320x320)
+            images = self.preprocess_images(batch_images, target_size=320)
 
-        # Get predictions
-        predictions = self.race_model(images)
-        predicted_labels = torch.argmax(predictions, dim=1).cpu().numpy()
-        true_labels = race_labels.cpu().numpy()
+            # Get predictions
+            predictions = self.race_model(images)
+            predicted_labels = torch.argmax(predictions.detach(), dim=1).cpu().numpy()
+            
+            all_predicted_labels.append(predicted_labels)
+            all_true_labels.append(batch_labels.cpu().numpy().flatten())
+            
+            # Clear GPU cache after each batch
+            del images, predictions
+            torch.cuda.empty_cache()
+        
+        # Concatenate all predictions and labels
+        predicted_labels = np.concatenate(all_predicted_labels, axis=0)
+        true_labels = np.concatenate(all_true_labels, axis=0)
+        
+        # Check if race model has a targets attribute (class names)
+        if hasattr(self.race_model, 'targets'):
+            model_targets = self.race_model.targets
+            # Map model output indices to dataset label indices
+            # Model outputs: ['Asian', 'Black', 'White'] (indices 0, 1, 2)
+            # Dataset labels: 0=White, 1=Black, 2=Asian, 3=Hispanic
+            # Mapping: Model 0='Asian' → Dataset 2, Model 1='Black' → Dataset 1, Model 2='White' → Dataset 0
+            model_to_dataset_map = {}
+            for model_idx, class_name in enumerate(model_targets):
+                if class_name == 'White':
+                    model_to_dataset_map[model_idx] = 0
+                elif class_name == 'Black':
+                    model_to_dataset_map[model_idx] = 1
+                elif class_name == 'Asian':
+                    model_to_dataset_map[model_idx] = 2
+                else:
+                    # Unknown class - mark as invalid
+                    model_to_dataset_map[model_idx] = -1
+            
+            # Map predictions from model indices to dataset label indices
+            mapped_predictions = np.array([model_to_dataset_map.get(pred, -1) for pred in predicted_labels])
+            
+            # Filter out samples where mapping failed or label is Hispanic (3) or invalid (-1)
+            # Hispanic (3) is not in the model, so we can't evaluate it
+            valid_mask = (true_labels >= 0) & (true_labels < 3) & (mapped_predictions >= 0)
+            
+            true_labels = true_labels[valid_mask]
+            predicted_labels = mapped_predictions[valid_mask]
+        else:
+            # No targets attribute - assume direct mapping (fallback)
+            # Filter out Hispanic (3) and invalid labels (-1)
+            valid_mask = (true_labels >= 0) & (true_labels < 3)
+            true_labels = true_labels[valid_mask]
+            predicted_labels = predicted_labels[valid_mask]
+        
+        if len(true_labels) == 0:
+            return np.nan
 
         return accuracy_score(true_labels, predicted_labels)
 
@@ -230,26 +513,53 @@ class TextPromptAlignmentMetrics:
     def compute_age_rmse(
         self,
         synthetic_images: torch.Tensor,
-        age_labels: torch.Tensor
+        age_labels: torch.Tensor,
+        batch_size: int = 32
     ) -> float:
         """
         Compute age prediction RMSE in years.
+        
+        Processes images in batches to avoid OOM.
 
         Args:
             synthetic_images: Synthetic images [B, C, H, W]
             age_labels: Ground truth ages in years [B]
+            batch_size: Batch size for processing to avoid OOM
 
         Returns:
             RMSE in years
         """
-        # Preprocess images
-        images = self.preprocess_images(synthetic_images)
+        all_predictions = []
+        all_labels = []
+        
+        # Process in batches to avoid OOM
+        num_images = len(synthetic_images)
+        for i in range(0, num_images, batch_size):
+            end_i = min(i + batch_size, num_images)
+            batch_images = synthetic_images[i:end_i]
+            batch_labels = age_labels[i:end_i]
+            
+            # Preprocess images (AgeModel expects 320x320)
+            images = self.preprocess_images(batch_images, target_size=320)
 
-        # Get predictions
-        predictions = self.age_model(images).squeeze()
+            # Get predictions
+            # Use flatten() instead of squeeze() to avoid creating 0-dimensional tensors
+            # when batch size is 1. flatten() ensures we always have at least 1 dimension.
+            predictions = self.age_model(images).flatten()
+            
+            all_predictions.append(predictions.cpu())
+            all_labels.append(batch_labels.cpu())
+            
+            # Clear GPU cache after each batch
+            del images, predictions
+            torch.cuda.empty_cache()
+        
+        # Concatenate all predictions and labels
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
 
         # Compute RMSE
-        rmse = torch.sqrt(F.mse_loss(predictions, age_labels.to(self.device)))
+        rmse = torch.sqrt(F.mse_loss(all_predictions, all_labels))
 
         return rmse.item()
 
@@ -274,6 +584,9 @@ class RealSyntheticSimilarityMetrics:
         # Inception v3 for FID
         self.inception_model = None  # Will be loaded lazily
 
+        # RadImageNet ResNet50 for medical FID
+        self.radimagenet_model = None  # Will be loaded lazily
+
         # BioViL encoder for medical image embeddings
         self.biovil_model = None  # Will be loaded lazily
 
@@ -286,36 +599,141 @@ class RealSyntheticSimilarityMetrics:
             self.inception_model.to(self.device)
             self.inception_model.eval()
 
+    def _load_radimagenet(self):
+        """Lazy load RadImageNet ResNet50 model for medical FID computation."""
+        if self.radimagenet_model is None:
+            import os
+            import sys
+            
+            # Try loading from local path first
+            try:
+                print("Loading RadImageNet ResNet50 from local path...")
+                
+                # Add the local model path to Python path
+                local_model_path = "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/pretrained_models/fid_radnet/radimagenet-models-main/radimagenet-models-main"
+                if local_model_path not in sys.path:
+                    sys.path.insert(0, local_model_path)
+                
+                # Import the model function
+                from radimagenet_models.models.resnet import radimagenet_resnet50
+                
+                # Try to load with local model directory
+                local_model_dir = "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/pretrained_models/fid_radnet"
+                
+                # Check if weights file exists locally
+                weights_file = os.path.join(local_model_dir, "RadImageNet-ResNet50_notop.pth")
+                
+                if os.path.exists(weights_file):
+                    print(f"Found local weights file: {weights_file}")
+                    # Load model with local weights
+                    self.radimagenet_model = radimagenet_resnet50(model_dir=local_model_dir, progress=True)
+                else:
+                    print("Local weights file not found, downloading...")
+                    # This will download the weights to the local directory
+                    self.radimagenet_model = radimagenet_resnet50(model_dir=local_model_dir, progress=True)
+                
+                # Remove final FC layer to get features (spatial features before pooling)
+                # We'll do spatial averaging in the embedding extraction function
+                if hasattr(self.radimagenet_model, 'fc'):
+                    self.radimagenet_model.fc = nn.Identity()
+                elif hasattr(self.radimagenet_model, 'classifier'):
+                    self.radimagenet_model.classifier = nn.Identity()
+                
+                self.radimagenet_model.to(self.device)
+                self.radimagenet_model.eval()
+                print("✓ RadImageNet ResNet50 loaded successfully from local path")
+                return
+                    
+            except Exception as e:
+                import traceback
+                error_traceback = traceback.format_exc()
+                print(f"⚠️ Failed to load RadImageNet from local path: {e}")
+                print("Falling back to torch.hub loading...")
+            
+            # Fallback to torch.hub loading with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    print(f"Loading RadImageNet ResNet50 via torch.hub (attempt {attempt + 1}/{max_retries})...")
+                    self.radimagenet_model = torch.hub.load(
+                        "Warvito/radimagenet-models", 
+                        model="radimagenet_resnet50", 
+                        trust_repo=True, 
+                        verbose=False
+                    )
+                    
+                    # Remove final FC layer to get features (spatial features before pooling)
+                    # We'll do spatial averaging in the embedding extraction function
+                    if hasattr(self.radimagenet_model, 'fc'):
+                        self.radimagenet_model.fc = nn.Identity()
+                    elif hasattr(self.radimagenet_model, 'classifier'):
+                        self.radimagenet_model.classifier = nn.Identity()
+                    
+                    self.radimagenet_model.to(self.device)
+                    self.radimagenet_model.eval()
+                    print("✓ RadImageNet ResNet50 loaded successfully via torch.hub")
+                    return
+                    
+                except Exception as e:
+                    print(f"⚠️ Attempt {attempt + 1} failed: {e}")
+                    if attempt == max_retries - 1:
+                        print("Failed to load RadImageNet model after all attempts")
+                        # Final fallback to ImageNet-pretrained ResNet50
+                        try:
+                            from torchvision.models import resnet50
+                            print("⚠️ Falling back to ImageNet-pretrained ResNet50...")
+                            fallback_model = resnet50(pretrained=True)
+                            fallback_model.fc = nn.Identity()
+                            self.radimagenet_model = fallback_model
+                            self.radimagenet_model.to(self.device)
+                            self.radimagenet_model.eval()
+                            print("✓ Using ImageNet-pretrained ResNet50 as fallback")
+                            warnings.warn(
+                                "RadImageNet loading failed. Using ImageNet-pretrained ResNet50 as fallback. "
+                                "This may give less accurate FID scores for medical images."
+                            )
+                        except Exception as fallback_error:
+                            warnings.warn(f"Could not load ResNet50 fallback model: {fallback_error}")
+                            self.radimagenet_model = None
+                    else:
+                        print("Retrying in 5 seconds...")
+                        import time
+                        time.sleep(5)
+
     def _load_biovil(self):
-        """Lazy load BioViL model for medical image embeddings."""
+        """Lazy load BioViL model using hi-ml-multimodal library."""
         if self.biovil_model is None:
             try:
-                from transformers import AutoModel, AutoProcessor
+                from health_multimodal.image.utils import get_image_inference, ImageModelType
 
-                # Load the full model
-                model = AutoModel.from_pretrained(
-                    "microsoft/BiomedVLP-CXR-BERT-specialized",
-                    trust_remote_code=True
+                # Load BioViL using the official hi-ml-multimodal library
+                self.biovil_inference_engine = get_image_inference(
+                    image_model_type=ImageModelType.BIOVIL
                 )
-
-                # Extract only the vision encoder
-                if hasattr(model, 'vision_model'):
-                    self.biovil_model = model.vision_model
-                elif hasattr(model, 'vision_encoder'):
-                    self.biovil_model = model.vision_encoder
-                else:
-                    # If we can't find vision encoder, use full model with processor
-                    self.biovil_model = model
-                    self.biovil_processor = AutoProcessor.from_pretrained(
-                        "microsoft/BiomedVLP-CXR-BERT-specialized",
-                        trust_remote_code=True
-                    )
-
-                self.biovil_model.to(self.device)
-                self.biovil_model.eval()
+                
+                # Move model to device
+                self.biovil_inference_engine.model.to(self.device)
+                self.biovil_inference_engine.model.eval()
+                
+                # Store the transform for preprocessing
+                self.biovil_transform = self.biovil_inference_engine.transform
+                
+                # Store model reference for convenience
+                self.biovil_model = self.biovil_inference_engine.model
+                
+                print("✓ BioViL loaded successfully using hi-ml-multimodal library")
+                    
+            except ImportError as e:
+                warnings.warn(
+                    f"Could not import hi-ml-multimodal library: {e}\n"
+                    "Please install it using: pip install hi-ml-multimodal"
+                )
+                self.biovil_model = None
+                self.biovil_inference_engine = None
             except Exception as e:
                 warnings.warn(f"Could not load BioViL model: {e}")
                 self.biovil_model = None
+                self.biovil_inference_engine = None
 
     @torch.no_grad()
     def compute_fid(
@@ -340,6 +758,12 @@ class RealSyntheticSimilarityMetrics:
         # Get embeddings for both image sets
         real_embeddings = self._get_inception_embeddings(real_images, batch_size)
         synthetic_embeddings = self._get_inception_embeddings(synthetic_images, batch_size)
+
+        # Ensure embeddings are 2D [N, D] for covariance computation
+        if real_embeddings.ndim > 2:
+            real_embeddings = real_embeddings.reshape(real_embeddings.shape[0], -1)
+        if synthetic_embeddings.ndim > 2:
+            synthetic_embeddings = synthetic_embeddings.reshape(synthetic_embeddings.shape[0], -1)
 
         # Compute mean and covariance
         mu_real = np.mean(real_embeddings, axis=0)
@@ -376,6 +800,12 @@ class RealSyntheticSimilarityMetrics:
         Returns:
             Embeddings [N, 2048]
         """
+        # Ensure Inception model is loaded
+        self._load_inception()
+        
+        if self.inception_model is None:
+            raise RuntimeError("Failed to load Inception model for FID computation")
+        
         # Normalize to [0, 1]
         if images.min() < 0:
             images = (images + 1.0) / 2.0
@@ -400,6 +830,139 @@ class RealSyntheticSimilarityMetrics:
             embeddings.append(embedding.cpu().numpy())
 
         return np.concatenate(embeddings, axis=0)
+
+    @torch.no_grad()
+    def compute_fid_radimagenet(
+        self,
+        real_images: torch.Tensor,
+        synthetic_images: torch.Tensor,
+        batch_size: int = 32
+    ) -> float:
+        """
+        Compute Fréchet Inception Distance using RadImageNet ResNet50 embeddings.
+        This is more appropriate for medical images than Inception v3.
+
+        Args:
+            real_images: Real images [N, C, H, W]
+            synthetic_images: Synthetic images [N, C, H, W]
+            batch_size: Batch size for processing
+
+        Returns:
+            FID score (lower is better, 0 is perfect match)
+        """
+        self._load_radimagenet()
+
+        # Get embeddings for both image sets
+        print("Extracting RadImageNet embeddings from real images...")
+        real_embeddings = self._get_radimagenet_embeddings(real_images, batch_size)
+        print("Extracting RadImageNet embeddings from synthetic images...")
+        synthetic_embeddings = self._get_radimagenet_embeddings(synthetic_images, batch_size)
+
+        # Ensure embeddings are 2D [N, D] for covariance computation
+        if real_embeddings.ndim > 2:
+            real_embeddings = real_embeddings.reshape(real_embeddings.shape[0], -1)
+        if synthetic_embeddings.ndim > 2:
+            synthetic_embeddings = synthetic_embeddings.reshape(synthetic_embeddings.shape[0], -1)
+
+        # Compute mean and covariance
+        mu_real = np.mean(real_embeddings, axis=0)
+        sigma_real = np.cov(real_embeddings, rowvar=False)
+
+        mu_synthetic = np.mean(synthetic_embeddings, axis=0)
+        sigma_synthetic = np.cov(synthetic_embeddings, rowvar=False)
+
+        # Compute FID
+        ssdiff = np.sum((mu_real - mu_synthetic) ** 2.0)
+        covmean = sqrtm(sigma_real.dot(sigma_synthetic))
+
+        # Handle numerical errors
+        if np.iscomplexobj(covmean):
+            covmean = covmean.real
+
+        fid = ssdiff + np.trace(sigma_real + sigma_synthetic - 2.0 * covmean)
+
+        return float(fid)
+
+    @torch.no_grad()
+    def _get_radimagenet_embeddings(
+        self,
+        images: torch.Tensor,
+        batch_size: int
+    ) -> np.ndarray:
+        """
+        Extract RadImageNet ResNet50 embeddings from images.
+
+        Args:
+            images: Images [N, C, H, W] in range [0, 1] or [-1, 1]
+            batch_size: Batch size for processing
+
+        Returns:
+            Embeddings [N, 2048] (ResNet50 feature dimension)
+        """
+        # Ensure RadImageNet model is loaded
+        self._load_radimagenet()
+        
+        if self.radimagenet_model is None:
+            raise RuntimeError("Failed to load RadImageNet model for FID computation")
+        
+        # Ensure images are on the correct device
+        if images.device != torch.device(self.device):
+            images = images.to(self.device)
+        
+        # Normalize to [0, 1]
+        if images.min() < 0:
+            images = (images + 1.0) / 2.0
+
+        # Resize to 224x224 for ResNet50
+        images = F.interpolate(images, size=(224, 224), mode="bilinear", align_corners=False)
+
+        # Convert grayscale to RGB if needed
+        if images.shape[1] == 1:
+            images = images.repeat(1, 3, 1, 1)
+
+        # RadImageNet preprocessing: Change RGB to BGR and subtract mean
+        # Reference: https://github.com/BMEII-AI/RadImageNet
+        # Change order from 'RGB' to 'BGR'
+        images = images[:, [2, 1, 0], ...]
+        
+        # Subtract mean used during RadImageNet training [B, G, R] = [0.406, 0.456, 0.485]
+        # Note: After BGR conversion, channels are [B, G, R]
+        mean = torch.tensor([0.406, 0.456, 0.485]).view(1, 3, 1, 1).to(images.device)
+        images = images - mean
+
+        # Extract embeddings in batches
+        embeddings = []
+        num_batches = (len(images) + batch_size - 1) // batch_size
+        for batch_idx, i in enumerate(range(0, len(images), batch_size)):
+            if batch_idx % 10 == 0 or batch_idx == num_batches - 1:
+                print(f"  Processing RadImageNet batch {batch_idx + 1}/{num_batches}...")
+            batch = images[i:i+batch_size].to(self.device)
+            with torch.no_grad():
+                feature_image = self.radimagenet_model(batch)
+                # Spatial average: mean over spatial dimensions [2, 3]
+                # This flattens the spatial dimensions: [B, C, H, W] -> [B, C]
+                if feature_image.dim() == 4:
+                    embedding = feature_image.mean([2, 3], keepdim=False)
+                elif feature_image.dim() == 2:
+                    # Already flattened
+                    embedding = feature_image
+                elif feature_image.dim() == 1:
+                    # Single sample, add batch dimension
+                    embedding = feature_image.unsqueeze(0)
+                else:
+                    # Fallback: flatten all non-batch dimensions
+                    embedding = feature_image.view(feature_image.size(0), -1)
+            embeddings.append(embedding.cpu().numpy())
+            # Clear GPU cache periodically
+            if batch_idx % 10 == 0:
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        result = np.concatenate(embeddings, axis=0)
+        # Ensure final result is 2D [N, D]
+        if result.ndim > 2:
+            result = result.reshape(result.shape[0], -1)
+        print(f"  ✓ Extracted {result.shape[0]} embeddings with dimension {result.shape[1]}")
+        return result
 
     @torch.no_grad()
     def compute_biovil_similarity(
@@ -436,53 +999,76 @@ class RealSyntheticSimilarityMetrics:
         return similarities.mean().item()
 
     @torch.no_grad()
-    def _get_biovil_embeddings(self, images: torch.Tensor) -> torch.Tensor:
+    def _get_biovil_embeddings(self, images: torch.Tensor, batch_size: int = 16) -> torch.Tensor:
         """
-        Extract BioViL embeddings from images.
+        Extract BioViL embeddings from images using hi-ml-multimodal library.
 
         Args:
-            images: Images [N, C, H, W]
+            images: Images [N, C, H, W] in range [0, 1] or [-1, 1]
+            batch_size: Batch size for processing to avoid OOM errors
 
         Returns:
-            Embeddings [N, D]
+            Embeddings [N, D] in the joint image-text latent space, L2-normalized
         """
+        from PIL import Image
+        
+        if self.biovil_inference_engine is None:
+            raise RuntimeError(
+                "BioViL model not loaded. Please ensure hi-ml-multimodal is installed: "
+                "pip install hi-ml-multimodal"
+            )
+
         # Normalize to [0, 1]
         if images.min() < 0:
             images = (images + 1.0) / 2.0
 
-        # BioViL expects RGB images
-        if images.shape[1] == 1:
-            images = images.repeat(1, 3, 1, 1)
-
-        # Resize to BioViL input size (typically 224x224 or 512x512)
-        images = F.interpolate(images, size=(224, 224), mode="bilinear", align_corners=False)
-
-        # Extract embeddings
-        try:
-            # Try direct image encoding (if we have vision encoder)
-            outputs = self.biovil_model(pixel_values=images.to(self.device))
-
-            # Handle different output formats
-            if hasattr(outputs, 'pooler_output'):
-                embeddings = outputs.pooler_output
-            elif hasattr(outputs, 'last_hidden_state'):
-                # Use CLS token or mean pooling
-                embeddings = outputs.last_hidden_state[:, 0]  # CLS token
-            elif isinstance(outputs, torch.Tensor):
-                embeddings = outputs
+        # Convert tensor to PIL Images for processing
+        pil_images = []
+        for i in range(images.shape[0]):
+            # Get single image [C, H, W]
+            img = images[i]
+            
+            # Convert to numpy and scale to [0, 255]
+            img_np = img.cpu().numpy()
+            
+            # Handle grayscale (single channel)
+            if img_np.shape[0] == 1:
+                img_np = img_np[0]  # Remove channel dimension -> [H, W]
+                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+                pil_img = Image.fromarray(img_np, mode='L')  # Grayscale
             else:
-                embeddings = outputs[0][:, 0]  # Fallback
+                # RGB image - convert to grayscale for BioViL (expects chest X-rays in grayscale)
+                img_np = img_np.transpose(1, 2, 0)  # [C, H, W] -> [H, W, C]
+                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+                pil_img = Image.fromarray(img_np, mode='RGB').convert('L')  # Convert to grayscale
+            
+            pil_images.append(pil_img)
 
-        except TypeError:
-            # If that fails, it might need processor
-            if hasattr(self, 'biovil_processor'):
-                # Process images through the processor
-                inputs = self.biovil_processor(images=images, return_tensors="pt")
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                outputs = self.biovil_model(**inputs)
-                embeddings = outputs.pooler_output if hasattr(outputs, 'pooler_output') else outputs[0][:, 0]
-            else:
-                raise
+        # Process images in batches to avoid OOM
+        all_embeddings = []
+        for i in range(0, len(pil_images), batch_size):
+            batch_pil = pil_images[i:i + batch_size]
+            
+            # Apply BioViL transform (includes resize, normalize, etc.)
+            batch = torch.stack([self.biovil_transform(img) for img in batch_pil])
+            batch = batch.to(self.device)
+
+            # Extract embeddings using the inference engine
+            output = self.biovil_model(batch)  # Returns ImageModelOutput
+            batch_embeddings = output.projected_global_embedding  # [B, joint_feature_size]
+            
+            # L2 normalize (recommended for similarity computation)
+            batch_embeddings = F.normalize(batch_embeddings, p=2, dim=-1)
+            
+            # Move to CPU to save GPU memory
+            all_embeddings.append(batch_embeddings.cpu())
+            
+            # Clear GPU cache
+            del batch, output, batch_embeddings
+            torch.cuda.empty_cache()
+        
+        # Concatenate all embeddings and move back to device
+        embeddings = torch.cat(all_embeddings, dim=0).to(self.device)
 
         return embeddings
 
@@ -519,6 +1105,827 @@ class RealSyntheticSimilarityMetrics:
 
         return ms_ssim_val.item()
 
+    @staticmethod
+    def _get_age_group(age: float) -> str:
+        """
+        Convert age in years to age group string.
+        
+        Args:
+            age: Age in years
+            
+        Returns:
+            Age group string: "0-18", "18-40", "40-60", "60-80", "80+", or "unknown"
+        """
+        if age < 0:
+            return "unknown"
+        elif age < 18:
+            return "0-18"
+        elif age < 40:
+            return "18-40"
+        elif age < 60:
+            return "40-60"
+        elif age < 80:
+            return "60-80"
+        else:
+            return "80+"
+
+    @staticmethod
+    def _get_sex_label(sex_idx: int) -> str:
+        """
+        Convert sex index to label string.
+        
+        Args:
+            sex_idx: Sex index (0=Female, 1=Male, -1=invalid)
+            
+        Returns:
+            Sex label: "Female", "Male", or "unknown"
+        """
+        if sex_idx == 0:
+            return "Female"
+        elif sex_idx == 1:
+            return "Male"
+        else:
+            return "unknown"
+
+    @staticmethod
+    def _get_race_label(race_idx: int) -> str:
+        """
+        Convert race index to label string.
+        
+        Args:
+            race_idx: Race index (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            
+        Returns:
+            Race label: "White", "Black", "Asian", "Hispanic", or "unknown"
+        """
+        race_map = {
+            0: "White",
+            1: "Black",
+            2: "Asian",
+            3: "Hispanic",
+        }
+        return race_map.get(race_idx, "unknown")
+
+    @torch.no_grad()
+    def compute_fid_per_subgroup(
+        self,
+        real_images: torch.Tensor,
+        synthetic_images: torch.Tensor,
+        sex_labels: Optional[torch.Tensor] = None,
+        race_labels: Optional[torch.Tensor] = None,
+        age_labels: Optional[torch.Tensor] = None,
+        batch_size: int = 32,
+        use_radimagenet: bool = False
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Compute FID per subgroup (Level 1: per sex, per ethnicity, per age group).
+        
+        OPTIMIZED: Computes embeddings once for all images, then filters by subgroup.
+        This is much more efficient than recomputing embeddings for each subgroup.
+        
+        Args:
+            real_images: Real images [N, C, H, W]
+            synthetic_images: Synthetic images [N, C, H, W]
+            sex_labels: Sex labels [N] (0=Female, 1=Male, -1=invalid)
+            race_labels: Race labels [N] (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            age_labels: Age labels [N] (age in years, -1=invalid)
+            batch_size: Batch size for processing
+            use_radimagenet: If True, use RadImageNet FID instead of Inception v3
+            
+        Returns:
+            Dictionary with structure:
+            {
+                "sex": {"Female": fid_value, "Male": fid_value},
+                "race": {"White": fid_value, "Black": fid_value, ...},
+                "age_group": {"0-18": fid_value, "18-40": fid_value, ...}
+            }
+        """
+        results = {
+            "sex": {},
+            "race": {},
+            "age_group": {}
+        }
+        
+        # OPTIMIZATION: Compute embeddings once for all images
+        print("  Computing embeddings for all images (once)...")
+        if use_radimagenet:
+            real_embeddings = self._get_radimagenet_embeddings(real_images, batch_size)
+            synthetic_embeddings = self._get_radimagenet_embeddings(synthetic_images, batch_size)
+        else:
+            real_embeddings = self._get_inception_embeddings(real_images, batch_size)
+            synthetic_embeddings = self._get_inception_embeddings(synthetic_images, batch_size)
+        
+        # Ensure embeddings are 2D [N, D]
+        if real_embeddings.ndim > 2:
+            real_embeddings = real_embeddings.reshape(real_embeddings.shape[0], -1)
+        if synthetic_embeddings.ndim > 2:
+            synthetic_embeddings = synthetic_embeddings.reshape(synthetic_embeddings.shape[0], -1)
+        
+        # Helper function to compute FID from pre-computed embeddings
+        def compute_subgroup_fid_from_embeddings(real_emb, synth_emb, subgroup_name, group_type):
+            if len(real_emb) < 2 or len(synth_emb) < 2:
+                return np.nan
+            
+            try:
+                # Compute mean and covariance from embeddings
+                mu_real = np.mean(real_emb, axis=0)
+                sigma_real = np.cov(real_emb, rowvar=False)
+                
+                mu_synthetic = np.mean(synth_emb, axis=0)
+                sigma_synthetic = np.cov(synth_emb, rowvar=False)
+                
+                # Compute FID
+                ssdiff = np.sum((mu_real - mu_synthetic) ** 2.0)
+                covmean = sqrtm(sigma_real.dot(sigma_synthetic))
+                
+                # Handle numerical errors
+                if np.iscomplexobj(covmean):
+                    covmean = covmean.real
+                
+                fid = ssdiff + np.trace(sigma_real + sigma_synthetic - 2.0 * covmean)
+                return float(fid)
+            except Exception as e:
+                warnings.warn(f"Failed to compute FID for {group_type} subgroup '{subgroup_name}': {e}")
+                return np.nan
+        
+        # Ensure labels are on the same device as images
+        device = real_images.device
+        
+        # Group by sex
+        if sex_labels is not None:
+            if isinstance(sex_labels, torch.Tensor):
+                sex_labels_tensor = sex_labels.to(device)
+            else:
+                sex_labels_tensor = torch.tensor(sex_labels, dtype=torch.long, device=device)
+            
+            for sex_idx in [0, 1]:  # Female, Male
+                mask = (sex_labels_tensor == sex_idx)
+                if mask.sum().item() >= 2:  # Need at least 2 samples
+                    sex_label = self._get_sex_label(sex_idx)
+                    # Filter embeddings by mask (much faster than recomputing)
+                    mask_np = mask.cpu().numpy()
+                    real_emb_subset = real_embeddings[mask_np]
+                    synth_emb_subset = synthetic_embeddings[mask_np]
+                    fid = compute_subgroup_fid_from_embeddings(real_emb_subset, synth_emb_subset, sex_label, "sex")
+                    if not np.isnan(fid):
+                        results["sex"][sex_label] = fid
+        
+        # Group by race
+        if race_labels is not None:
+            if isinstance(race_labels, torch.Tensor):
+                race_labels_tensor = race_labels.to(device)
+            else:
+                race_labels_tensor = torch.tensor(race_labels, dtype=torch.long, device=device)
+            
+            for race_idx in [0, 1, 2, 3]:  # White, Black, Asian, Hispanic
+                mask = (race_labels_tensor == race_idx)
+                if mask.sum().item() >= 2:  # Need at least 2 samples
+                    race_label = self._get_race_label(race_idx)
+                    # Filter embeddings by mask (much faster than recomputing)
+                    mask_np = mask.cpu().numpy()
+                    real_emb_subset = real_embeddings[mask_np]
+                    synth_emb_subset = synthetic_embeddings[mask_np]
+                    fid = compute_subgroup_fid_from_embeddings(real_emb_subset, synth_emb_subset, race_label, "race")
+                    if not np.isnan(fid):
+                        results["race"][race_label] = fid
+        
+        # Group by age group
+        if age_labels is not None:
+            if isinstance(age_labels, torch.Tensor):
+                age_labels_tensor = age_labels.to(device)
+            else:
+                age_labels_tensor = torch.tensor(age_labels, dtype=torch.float32, device=device)
+            
+            age_groups = ["0-18", "18-40", "40-60", "60-80", "80+"]
+            for age_group in age_groups:
+                # Create mask for this age group
+                mask = torch.zeros(len(age_labels_tensor), dtype=torch.bool, device=device)
+                for i, age in enumerate(age_labels_tensor):
+                    if age.item() >= 0:
+                        group = self._get_age_group(age.item())
+                        if group == age_group:
+                            mask[i] = True
+                
+                if mask.sum().item() >= 2:  # Need at least 2 samples
+                    # Filter embeddings by mask (much faster than recomputing)
+                    mask_np = mask.cpu().numpy()
+                    real_emb_subset = real_embeddings[mask_np]
+                    synth_emb_subset = synthetic_embeddings[mask_np]
+                    fid = compute_subgroup_fid_from_embeddings(real_emb_subset, synth_emb_subset, age_group, "age_group")
+                    if not np.isnan(fid):
+                        results["age_group"][age_group] = fid
+        
+        return results
+
+    @torch.no_grad()
+    def compute_fid_per_intersectional_subgroup(
+        self,
+        real_images: torch.Tensor,
+        synthetic_images: torch.Tensor,
+        sex_labels: Optional[torch.Tensor] = None,
+        race_labels: Optional[torch.Tensor] = None,
+        age_labels: Optional[torch.Tensor] = None,
+        batch_size: int = 32,
+        use_radimagenet: bool = False
+    ) -> Dict[str, float]:
+        """
+        Compute FID per intersectional subgroup (Level 2: age group x ethnicity x sex).
+        
+        OPTIMIZED: Computes embeddings once for all images, then filters by subgroup.
+        This is much more efficient than recomputing embeddings for each subgroup.
+        
+        Args:
+            real_images: Real images [N, C, H, W]
+            synthetic_images: Synthetic images [N, C, H, W]
+            sex_labels: Sex labels [N] (0=Female, 1=Male, -1=invalid)
+            race_labels: Race labels [N] (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            age_labels: Age labels [N] (age in years, -1=invalid)
+            batch_size: Batch size for processing
+            use_radimagenet: If True, use RadImageNet FID instead of Inception v3
+            
+        Returns:
+            Dictionary mapping intersectional subgroup names to FID values.
+            Format: "age_group_sex_race" -> fid_value
+            Example: "40-60_Male_White": 15.23
+        """
+        results = {}
+        
+        if sex_labels is None or race_labels is None or age_labels is None:
+            warnings.warn("Missing labels for intersectional subgroup analysis. Returning empty results.")
+            return results
+        
+        # OPTIMIZATION: Compute embeddings once for all images
+        print("  Computing embeddings for all images (once) for intersectional subgroups...")
+        if use_radimagenet:
+            real_embeddings = self._get_radimagenet_embeddings(real_images, batch_size)
+            synthetic_embeddings = self._get_radimagenet_embeddings(synthetic_images, batch_size)
+        else:
+            real_embeddings = self._get_inception_embeddings(real_images, batch_size)
+            synthetic_embeddings = self._get_inception_embeddings(synthetic_images, batch_size)
+        
+        # Ensure embeddings are 2D [N, D]
+        if real_embeddings.ndim > 2:
+            real_embeddings = real_embeddings.reshape(real_embeddings.shape[0], -1)
+        if synthetic_embeddings.ndim > 2:
+            synthetic_embeddings = synthetic_embeddings.reshape(synthetic_embeddings.shape[0], -1)
+        
+        # Convert to tensors if needed
+        if isinstance(sex_labels, torch.Tensor):
+            sex_labels_tensor = sex_labels
+        else:
+            sex_labels_tensor = torch.tensor(sex_labels, dtype=torch.long)
+        
+        if isinstance(race_labels, torch.Tensor):
+            race_labels_tensor = race_labels
+        else:
+            race_labels_tensor = torch.tensor(race_labels, dtype=torch.long)
+        
+        if isinstance(age_labels, torch.Tensor):
+            age_labels_tensor = age_labels
+        else:
+            age_labels_tensor = torch.tensor(age_labels, dtype=torch.float32)
+        
+        # Ensure all tensors are on the same device
+        device = real_images.device
+        sex_labels_tensor = sex_labels_tensor.to(device)
+        race_labels_tensor = race_labels_tensor.to(device)
+        age_labels_tensor = age_labels_tensor.to(device)
+        
+        # Helper function to compute FID from pre-computed embeddings
+        def compute_intersectional_fid_from_embeddings(real_emb, synth_emb, subgroup_name):
+            if len(real_emb) < 2 or len(synth_emb) < 2:
+                return np.nan
+            
+            try:
+                # Compute mean and covariance from embeddings
+                mu_real = np.mean(real_emb, axis=0)
+                sigma_real = np.cov(real_emb, rowvar=False)
+                
+                mu_synthetic = np.mean(synth_emb, axis=0)
+                sigma_synthetic = np.cov(synth_emb, rowvar=False)
+                
+                # Compute FID
+                ssdiff = np.sum((mu_real - mu_synthetic) ** 2.0)
+                covmean = sqrtm(sigma_real.dot(sigma_synthetic))
+                
+                # Handle numerical errors
+                if np.iscomplexobj(covmean):
+                    covmean = covmean.real
+                
+                fid = ssdiff + np.trace(sigma_real + sigma_synthetic - 2.0 * covmean)
+                return float(fid)
+            except Exception as e:
+                warnings.warn(f"Failed to compute FID for intersectional subgroup '{subgroup_name}': {e}")
+                return np.nan
+        
+        # Iterate over all combinations
+        age_groups = ["0-18", "18-40", "40-60", "60-80", "80+"]
+        sex_values = [0, 1]  # Female, Male
+        race_values = [0, 1, 2, 3]  # White, Black, Asian, Hispanic
+        
+        for age_group in age_groups:
+            for sex_idx in sex_values:
+                for race_idx in race_values:
+                    # Create mask for this intersectional subgroup
+                    mask = torch.zeros(len(age_labels_tensor), dtype=torch.bool, device=device)
+                    for i in range(len(age_labels_tensor)):
+                        age = age_labels_tensor[i].item()
+                        sex = sex_labels_tensor[i].item()
+                        race = race_labels_tensor[i].item()
+                        
+                        # Check if this sample belongs to the subgroup
+                        if (age >= 0 and self._get_age_group(age) == age_group and
+                            sex == sex_idx and race == race_idx):
+                            mask[i] = True
+                    
+                    if mask.sum().item() >= 2:  # Need at least 2 samples
+                        sex_label = self._get_sex_label(sex_idx)
+                        race_label = self._get_race_label(race_idx)
+                        subgroup_name = f"{age_group}_{sex_label}_{race_label}"
+                        
+                        # Filter embeddings by mask (much faster than recomputing)
+                        mask_np = mask.cpu().numpy()
+                        real_emb_subset = real_embeddings[mask_np]
+                        synth_emb_subset = synthetic_embeddings[mask_np]
+                        
+                        fid = compute_intersectional_fid_from_embeddings(real_emb_subset, synth_emb_subset, subgroup_name)
+                        if not np.isnan(fid):
+                            results[subgroup_name] = fid
+        
+        return results
+
+    @torch.no_grad()
+    def compute_ms_ssim_per_subgroup(
+        self,
+        real_images: torch.Tensor,
+        synthetic_images: torch.Tensor,
+        sex_labels: Optional[torch.Tensor] = None,
+        race_labels: Optional[torch.Tensor] = None,
+        age_labels: Optional[torch.Tensor] = None
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Compute MS-SSIM per subgroup (Level 1: per sex, per ethnicity, per age group).
+        
+        Args:
+            real_images: Real images [N, C, H, W]
+            synthetic_images: Synthetic images [N, C, H, W]
+            sex_labels: Sex labels [N] (0=Female, 1=Male, -1=invalid)
+            race_labels: Race labels [N] (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            age_labels: Age labels [N] (age in years, -1=invalid)
+            
+        Returns:
+            Dictionary with structure:
+            {
+                "sex": {"Female": ms_ssim_value, "Male": ms_ssim_value},
+                "race": {"White": ms_ssim_value, "Black": ms_ssim_value, ...},
+                "age_group": {"0-18": ms_ssim_value, "18-40": ms_ssim_value, ...}
+            }
+        """
+        from pytorch_msssim import ms_ssim
+        
+        results = {
+            "sex": {},
+            "race": {},
+            "age_group": {}
+        }
+        
+        # Helper function to compute MS-SSIM for a subgroup
+        def compute_subgroup_ms_ssim(real_subset, synth_subset, subgroup_name, group_type):
+            if len(real_subset) < 1:
+                return np.nan
+            
+            try:
+                # Normalize to [0, 1]
+                real_norm = real_subset.clone()
+                synth_norm = synth_subset.clone()
+                if real_norm.min() < 0:
+                    real_norm = (real_norm + 1.0) / 2.0
+                if synth_norm.min() < 0:
+                    synth_norm = (synth_norm + 1.0) / 2.0
+                
+                ms_ssim_val = ms_ssim(
+                    real_norm,
+                    synth_norm,
+                    data_range=1.0,
+                    size_average=True
+                )
+                return float(ms_ssim_val.item())
+            except Exception as e:
+                warnings.warn(f"Failed to compute MS-SSIM for {group_type} subgroup '{subgroup_name}': {e}")
+                return np.nan
+        
+        # Ensure labels are on the same device as images
+        device = real_images.device
+        
+        # Group by sex
+        if sex_labels is not None:
+            if isinstance(sex_labels, torch.Tensor):
+                sex_labels_tensor = sex_labels.to(device)
+            else:
+                sex_labels_tensor = torch.tensor(sex_labels, dtype=torch.long, device=device)
+            
+            for sex_idx in [0, 1]:  # Female, Male
+                mask = (sex_labels_tensor == sex_idx)
+                if mask.sum().item() >= 1:  # Need at least 1 sample
+                    sex_label = self._get_sex_label(sex_idx)
+                    real_subset = real_images[mask]
+                    synth_subset = synthetic_images[mask]
+                    ms_ssim_val = compute_subgroup_ms_ssim(real_subset, synth_subset, sex_label, "sex")
+                    if not np.isnan(ms_ssim_val):
+                        results["sex"][sex_label] = ms_ssim_val
+        
+        # Group by race
+        if race_labels is not None:
+            if isinstance(race_labels, torch.Tensor):
+                race_labels_tensor = race_labels.to(device)
+            else:
+                race_labels_tensor = torch.tensor(race_labels, dtype=torch.long, device=device)
+            
+            for race_idx in [0, 1, 2, 3]:  # White, Black, Asian, Hispanic
+                mask = (race_labels_tensor == race_idx)
+                if mask.sum().item() >= 1:  # Need at least 1 sample
+                    race_label = self._get_race_label(race_idx)
+                    real_subset = real_images[mask]
+                    synth_subset = synthetic_images[mask]
+                    ms_ssim_val = compute_subgroup_ms_ssim(real_subset, synth_subset, race_label, "race")
+                    if not np.isnan(ms_ssim_val):
+                        results["race"][race_label] = ms_ssim_val
+        
+        # Group by age group
+        if age_labels is not None:
+            if isinstance(age_labels, torch.Tensor):
+                age_labels_tensor = age_labels.to(device)
+            else:
+                age_labels_tensor = torch.tensor(age_labels, dtype=torch.float32, device=device)
+            
+            age_groups = ["0-18", "18-40", "40-60", "60-80", "80+"]
+            for age_group in age_groups:
+                # Create mask for this age group
+                mask = torch.zeros(len(age_labels_tensor), dtype=torch.bool, device=device)
+                for i, age in enumerate(age_labels_tensor):
+                    if age.item() >= 0:
+                        group = self._get_age_group(age.item())
+                        if group == age_group:
+                            mask[i] = True
+                
+                if mask.sum().item() >= 1:  # Need at least 1 sample
+                    real_subset = real_images[mask]
+                    synth_subset = synthetic_images[mask]
+                    ms_ssim_val = compute_subgroup_ms_ssim(real_subset, synth_subset, age_group, "age_group")
+                    if not np.isnan(ms_ssim_val):
+                        results["age_group"][age_group] = ms_ssim_val
+        
+        return results
+
+    @torch.no_grad()
+    def compute_ms_ssim_per_intersectional_subgroup(
+        self,
+        real_images: torch.Tensor,
+        synthetic_images: torch.Tensor,
+        sex_labels: Optional[torch.Tensor] = None,
+        race_labels: Optional[torch.Tensor] = None,
+        age_labels: Optional[torch.Tensor] = None
+    ) -> Dict[str, float]:
+        """
+        Compute MS-SSIM per intersectional subgroup (Level 2: age group x ethnicity x sex).
+        
+        Args:
+            real_images: Real images [N, C, H, W]
+            synthetic_images: Synthetic images [N, C, H, W]
+            sex_labels: Sex labels [N] (0=Female, 1=Male, -1=invalid)
+            race_labels: Race labels [N] (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            age_labels: Age labels [N] (age in years, -1=invalid)
+            
+        Returns:
+            Dictionary mapping intersectional subgroup names to MS-SSIM values.
+            Format: "age_group_sex_race" -> ms_ssim_value
+            Example: "40-60_Male_White": 0.85
+        """
+        from pytorch_msssim import ms_ssim
+        
+        results = {}
+        
+        if sex_labels is None or race_labels is None or age_labels is None:
+            warnings.warn("Missing labels for intersectional subgroup analysis. Returning empty results.")
+            return results
+        
+        # Convert to tensors if needed
+        if isinstance(sex_labels, torch.Tensor):
+            sex_labels_tensor = sex_labels
+        else:
+            sex_labels_tensor = torch.tensor(sex_labels, dtype=torch.long)
+        
+        if isinstance(race_labels, torch.Tensor):
+            race_labels_tensor = race_labels
+        else:
+            race_labels_tensor = torch.tensor(race_labels, dtype=torch.long)
+        
+        if isinstance(age_labels, torch.Tensor):
+            age_labels_tensor = age_labels
+        else:
+            age_labels_tensor = torch.tensor(age_labels, dtype=torch.float32)
+        
+        # Ensure all tensors are on the same device
+        device = real_images.device
+        sex_labels_tensor = sex_labels_tensor.to(device)
+        race_labels_tensor = race_labels_tensor.to(device)
+        age_labels_tensor = age_labels_tensor.to(device)
+        
+        # Iterate over all combinations
+        age_groups = ["0-18", "18-40", "40-60", "60-80", "80+"]
+        sex_values = [0, 1]  # Female, Male
+        race_values = [0, 1, 2, 3]  # White, Black, Asian, Hispanic
+        
+        for age_group in age_groups:
+            for sex_idx in sex_values:
+                for race_idx in race_values:
+                    # Create mask for this intersectional subgroup
+                    mask = torch.zeros(len(age_labels_tensor), dtype=torch.bool, device=device)
+                    for i in range(len(age_labels_tensor)):
+                        age = age_labels_tensor[i].item()
+                        sex = sex_labels_tensor[i].item()
+                        race = race_labels_tensor[i].item()
+                        
+                        # Check if this sample belongs to the subgroup
+                        if (age >= 0 and self._get_age_group(age) == age_group and
+                            sex == sex_idx and race == race_idx):
+                            mask[i] = True
+                    
+                    if mask.sum().item() >= 1:  # Need at least 1 sample
+                        sex_label = self._get_sex_label(sex_idx)
+                        race_label = self._get_race_label(race_idx)
+                        subgroup_name = f"{age_group}_{sex_label}_{race_label}"
+                        
+                        real_subset = real_images[mask]
+                        synth_subset = synthetic_images[mask]
+                        
+                        try:
+                            # Normalize to [0, 1]
+                            real_norm = real_subset.clone()
+                            synth_norm = synth_subset.clone()
+                            if real_norm.min() < 0:
+                                real_norm = (real_norm + 1.0) / 2.0
+                            if synth_norm.min() < 0:
+                                synth_norm = (synth_norm + 1.0) / 2.0
+                            
+                            ms_ssim_val = ms_ssim(
+                                real_norm,
+                                synth_norm,
+                                data_range=1.0,
+                                size_average=True
+                            )
+                            results[subgroup_name] = float(ms_ssim_val.item())
+                        except Exception as e:
+                            warnings.warn(f"Failed to compute MS-SSIM for intersectional subgroup '{subgroup_name}': {e}")
+        
+        return results
+
+    @torch.no_grad()
+    def compute_biovil_similarity_per_subgroup(
+        self,
+        real_images: torch.Tensor,
+        synthetic_images: torch.Tensor,
+        sex_labels: Optional[torch.Tensor] = None,
+        race_labels: Optional[torch.Tensor] = None,
+        age_labels: Optional[torch.Tensor] = None,
+        batch_size: int = 16
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Compute BioViL similarity per subgroup (Level 1: per sex, per ethnicity, per age group).
+        
+        OPTIMIZED: Computes embeddings once for all images, then filters by subgroup.
+        This is much more efficient than recomputing embeddings for each subgroup.
+        
+        Args:
+            real_images: Real images [N, C, H, W]
+            synthetic_images: Synthetic images [N, C, H, W]
+            sex_labels: Sex labels [N] (0=Female, 1=Male, -1=invalid)
+            race_labels: Race labels [N] (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            age_labels: Age labels [N] (age in years, -1=invalid)
+            batch_size: Batch size for processing
+            
+        Returns:
+            Dictionary with structure:
+            {
+                "sex": {"Female": similarity_value, "Male": similarity_value},
+                "race": {"White": similarity_value, "Black": similarity_value, ...},
+                "age_group": {"0-18": similarity_value, "18-40": similarity_value, ...}
+            }
+        """
+        self._load_biovil()
+        
+        results = {
+            "sex": {},
+            "race": {},
+            "age_group": {}
+        }
+        
+        if self.biovil_model is None:
+            warnings.warn("BioViL model not available. Returning empty results.")
+            return results
+        
+        # OPTIMIZATION: Compute embeddings once for all images
+        print("  Computing BioViL embeddings for all images (once)...")
+        real_embeddings = self._get_biovil_embeddings(real_images, batch_size=batch_size)
+        synthetic_embeddings = self._get_biovil_embeddings(synthetic_images, batch_size=batch_size)
+        
+        # Ensure embeddings are normalized
+        real_embeddings = F.normalize(real_embeddings, dim=1)
+        synthetic_embeddings = F.normalize(synthetic_embeddings, dim=1)
+        
+        # Helper function to compute BioViL similarity from pre-computed embeddings
+        def compute_subgroup_biovil_from_embeddings(real_emb, synth_emb, subgroup_name, group_type):
+            if len(real_emb) < 1:
+                return np.nan
+            
+            try:
+                # Compute pairwise cosine similarity
+                similarities = torch.sum(real_emb * synth_emb, dim=1)
+                return float(similarities.mean().item())
+            except Exception as e:
+                warnings.warn(f"Failed to compute BioViL similarity for {group_type} subgroup '{subgroup_name}': {e}")
+                return np.nan
+        
+        # Ensure labels are on the same device as images
+        device = real_images.device
+        
+        # Group by sex
+        if sex_labels is not None:
+            if isinstance(sex_labels, torch.Tensor):
+                sex_labels_tensor = sex_labels.to(device)
+            else:
+                sex_labels_tensor = torch.tensor(sex_labels, dtype=torch.long, device=device)
+            
+            for sex_idx in [0, 1]:  # Female, Male
+                mask = (sex_labels_tensor == sex_idx)
+                if mask.sum().item() >= 1:  # Need at least 1 sample
+                    sex_label = self._get_sex_label(sex_idx)
+                    # Filter embeddings by mask (much faster than recomputing)
+                    mask_np = mask.cpu().numpy()
+                    real_emb_subset = real_embeddings[mask_np]
+                    synth_emb_subset = synthetic_embeddings[mask_np]
+                    biovil_val = compute_subgroup_biovil_from_embeddings(real_emb_subset, synth_emb_subset, sex_label, "sex")
+                    if not np.isnan(biovil_val):
+                        results["sex"][sex_label] = biovil_val
+        
+        # Group by race
+        if race_labels is not None:
+            if isinstance(race_labels, torch.Tensor):
+                race_labels_tensor = race_labels.to(device)
+            else:
+                race_labels_tensor = torch.tensor(race_labels, dtype=torch.long, device=device)
+            
+            for race_idx in [0, 1, 2, 3]:  # White, Black, Asian, Hispanic
+                mask = (race_labels_tensor == race_idx)
+                if mask.sum().item() >= 1:  # Need at least 1 sample
+                    race_label = self._get_race_label(race_idx)
+                    # Filter embeddings by mask (much faster than recomputing)
+                    mask_np = mask.cpu().numpy()
+                    real_emb_subset = real_embeddings[mask_np]
+                    synth_emb_subset = synthetic_embeddings[mask_np]
+                    biovil_val = compute_subgroup_biovil_from_embeddings(real_emb_subset, synth_emb_subset, race_label, "race")
+                    if not np.isnan(biovil_val):
+                        results["race"][race_label] = biovil_val
+        
+        # Group by age group
+        if age_labels is not None:
+            if isinstance(age_labels, torch.Tensor):
+                age_labels_tensor = age_labels.to(device)
+            else:
+                age_labels_tensor = torch.tensor(age_labels, dtype=torch.float32, device=device)
+            
+            age_groups = ["0-18", "18-40", "40-60", "60-80", "80+"]
+            for age_group in age_groups:
+                # Create mask for this age group
+                mask = torch.zeros(len(age_labels_tensor), dtype=torch.bool, device=device)
+                for i, age in enumerate(age_labels_tensor):
+                    if age.item() >= 0:
+                        group = self._get_age_group(age.item())
+                        if group == age_group:
+                            mask[i] = True
+                
+                if mask.sum().item() >= 1:  # Need at least 1 sample
+                    # Filter embeddings by mask (much faster than recomputing)
+                    mask_np = mask.cpu().numpy()
+                    real_emb_subset = real_embeddings[mask_np]
+                    synth_emb_subset = synthetic_embeddings[mask_np]
+                    biovil_val = compute_subgroup_biovil_from_embeddings(real_emb_subset, synth_emb_subset, age_group, "age_group")
+                    if not np.isnan(biovil_val):
+                        results["age_group"][age_group] = biovil_val
+        
+        return results
+
+    @torch.no_grad()
+    def compute_biovil_similarity_per_intersectional_subgroup(
+        self,
+        real_images: torch.Tensor,
+        synthetic_images: torch.Tensor,
+        sex_labels: Optional[torch.Tensor] = None,
+        race_labels: Optional[torch.Tensor] = None,
+        age_labels: Optional[torch.Tensor] = None,
+        batch_size: int = 16
+    ) -> Dict[str, float]:
+        """
+        Compute BioViL similarity per intersectional subgroup (Level 2: age group x ethnicity x sex).
+        
+        OPTIMIZED: Computes embeddings once for all images, then filters by subgroup.
+        This is much more efficient than recomputing embeddings for each subgroup.
+        
+        Args:
+            real_images: Real images [N, C, H, W]
+            synthetic_images: Synthetic images [N, C, H, W]
+            sex_labels: Sex labels [N] (0=Female, 1=Male, -1=invalid)
+            race_labels: Race labels [N] (0=White, 1=Black, 2=Asian, 3=Hispanic, -1=invalid)
+            age_labels: Age labels [N] (age in years, -1=invalid)
+            batch_size: Batch size for processing
+            
+        Returns:
+            Dictionary mapping intersectional subgroup names to BioViL similarity values.
+            Format: "age_group_sex_race" -> similarity_value
+            Example: "40-60_Male_White": 0.92
+        """
+        self._load_biovil()
+        
+        results = {}
+        
+        if self.biovil_model is None:
+            warnings.warn("BioViL model not available. Returning empty results.")
+            return results
+        
+        if sex_labels is None or race_labels is None or age_labels is None:
+            warnings.warn("Missing labels for intersectional subgroup analysis. Returning empty results.")
+            return results
+        
+        # OPTIMIZATION: Compute embeddings once for all images
+        print("  Computing BioViL embeddings for all images (once) for intersectional subgroups...")
+        real_embeddings = self._get_biovil_embeddings(real_images, batch_size=batch_size)
+        synthetic_embeddings = self._get_biovil_embeddings(synthetic_images, batch_size=batch_size)
+        
+        # Ensure embeddings are normalized
+        real_embeddings = F.normalize(real_embeddings, dim=1)
+        synthetic_embeddings = F.normalize(synthetic_embeddings, dim=1)
+        
+        # Convert to tensors if needed
+        if isinstance(sex_labels, torch.Tensor):
+            sex_labels_tensor = sex_labels
+        else:
+            sex_labels_tensor = torch.tensor(sex_labels, dtype=torch.long)
+        
+        if isinstance(race_labels, torch.Tensor):
+            race_labels_tensor = race_labels
+        else:
+            race_labels_tensor = torch.tensor(race_labels, dtype=torch.long)
+        
+        if isinstance(age_labels, torch.Tensor):
+            age_labels_tensor = age_labels
+        else:
+            age_labels_tensor = torch.tensor(age_labels, dtype=torch.float32)
+        
+        # Ensure all tensors are on the same device
+        device = real_images.device
+        sex_labels_tensor = sex_labels_tensor.to(device)
+        race_labels_tensor = race_labels_tensor.to(device)
+        age_labels_tensor = age_labels_tensor.to(device)
+        
+        # Iterate over all combinations
+        age_groups = ["0-18", "18-40", "40-60", "60-80", "80+"]
+        sex_values = [0, 1]  # Female, Male
+        race_values = [0, 1, 2, 3]  # White, Black, Asian, Hispanic
+        
+        for age_group in age_groups:
+            for sex_idx in sex_values:
+                for race_idx in race_values:
+                    # Create mask for this intersectional subgroup
+                    mask = torch.zeros(len(age_labels_tensor), dtype=torch.bool, device=device)
+                    for i in range(len(age_labels_tensor)):
+                        age = age_labels_tensor[i].item()
+                        sex = sex_labels_tensor[i].item()
+                        race = race_labels_tensor[i].item()
+                        
+                        # Check if this sample belongs to the subgroup
+                        if (age >= 0 and self._get_age_group(age) == age_group and
+                            sex == sex_idx and race == race_idx):
+                            mask[i] = True
+                    
+                    if mask.sum().item() >= 1:  # Need at least 1 sample
+                        sex_label = self._get_sex_label(sex_idx)
+                        race_label = self._get_race_label(race_idx)
+                        subgroup_name = f"{age_group}_{sex_label}_{race_label}"
+                        
+                        # Filter embeddings by mask (much faster than recomputing)
+                        mask_np = mask.cpu().numpy()
+                        real_emb_subset = real_embeddings[mask_np]
+                        synth_emb_subset = synthetic_embeddings[mask_np]
+                        
+                        try:
+                            # Compute pairwise cosine similarity
+                            similarities = torch.sum(real_emb_subset * synth_emb_subset, dim=1)
+                            results[subgroup_name] = float(similarities.mean().item())
+                        except Exception as e:
+                            warnings.warn(f"Failed to compute BioViL similarity for intersectional subgroup '{subgroup_name}': {e}")
+        
+        return results
+
 
 class IntraPromptDiversityMetrics:
     """
@@ -537,35 +1944,39 @@ class IntraPromptDiversityMetrics:
         self.biovil_model = None
 
     def _load_biovil(self):
-        """Lazy load BioViL model."""
+        """Lazy load BioViL model using hi-ml-multimodal library."""
         if self.biovil_model is None:
             try:
-                from transformers import AutoModel, AutoProcessor
+                from health_multimodal.image.utils import get_image_inference, ImageModelType
 
-                # Load the full model
-                model = AutoModel.from_pretrained(
-                    "microsoft/BiomedVLP-CXR-BERT-specialized",
-                    trust_remote_code=True
+                # Load BioViL using the official hi-ml-multimodal library
+                self.biovil_inference_engine = get_image_inference(
+                    image_model_type=ImageModelType.BIOVIL
                 )
-
-                # Extract only the vision encoder
-                if hasattr(model, 'vision_model'):
-                    self.biovil_model = model.vision_model
-                elif hasattr(model, 'vision_encoder'):
-                    self.biovil_model = model.vision_encoder
-                else:
-                    # If we can't find vision encoder, use full model with processor
-                    self.biovil_model = model
-                    self.biovil_processor = AutoProcessor.from_pretrained(
-                        "microsoft/BiomedVLP-CXR-BERT-specialized",
-                        trust_remote_code=True
-                    )
-
-                self.biovil_model.to(self.device)
-                self.biovil_model.eval()
+                
+                # Move model to device
+                self.biovil_inference_engine.model.to(self.device)
+                self.biovil_inference_engine.model.eval()
+                
+                # Store the transform for preprocessing
+                self.biovil_transform = self.biovil_inference_engine.transform
+                
+                # Store model reference for convenience
+                self.biovil_model = self.biovil_inference_engine.model
+                
+                print("✓ BioViL loaded successfully using hi-ml-multimodal library")
+                    
+            except ImportError as e:
+                warnings.warn(
+                    f"Could not import hi-ml-multimodal library: {e}\n"
+                    "Please install it using: pip install hi-ml-multimodal"
+                )
+                self.biovil_model = None
+                self.biovil_inference_engine = None
             except Exception as e:
                 warnings.warn(f"Could not load BioViL model: {e}")
                 self.biovil_model = None
+                self.biovil_inference_engine = None
 
     def compute_intra_prompt_ms_ssim(
         self,
@@ -656,45 +2067,76 @@ class IntraPromptDiversityMetrics:
         return float(np.mean(per_prompt_sims))
 
     @torch.no_grad()
-    def _get_biovil_embeddings(self, images: torch.Tensor) -> torch.Tensor:
-        """Extract BioViL embeddings."""
+    def _get_biovil_embeddings(self, images: torch.Tensor, batch_size: int = 16) -> torch.Tensor:
+        """
+        Extract BioViL embeddings from images using hi-ml-multimodal library.
+
+        Args:
+            images: Images [N, C, H, W] in range [0, 1] or [-1, 1]
+            batch_size: Batch size for processing to avoid OOM errors
+
+        Returns:
+            Embeddings [N, D] in the joint image-text latent space, L2-normalized
+        """
+        from PIL import Image
+        
+        if self.biovil_inference_engine is None:
+            raise RuntimeError(
+                "BioViL model not loaded. Please ensure hi-ml-multimodal is installed: "
+                "pip install hi-ml-multimodal"
+            )
+
         # Normalize to [0, 1]
         if images.min() < 0:
             images = (images + 1.0) / 2.0
 
-        # Convert to RGB
-        if images.shape[1] == 1:
-            images = images.repeat(1, 3, 1, 1)
-
-        # Resize
-        images = F.interpolate(images, size=(224, 224), mode="bilinear", align_corners=False)
-
-        # Extract embeddings
-        try:
-            # Try direct image encoding (if we have vision encoder)
-            outputs = self.biovil_model(pixel_values=images.to(self.device))
-
-            # Handle different output formats
-            if hasattr(outputs, 'pooler_output'):
-                embeddings = outputs.pooler_output
-            elif hasattr(outputs, 'last_hidden_state'):
-                # Use CLS token or mean pooling
-                embeddings = outputs.last_hidden_state[:, 0]  # CLS token
-            elif isinstance(outputs, torch.Tensor):
-                embeddings = outputs
+        # Convert tensor to PIL Images for processing
+        pil_images = []
+        for i in range(images.shape[0]):
+            # Get single image [C, H, W]
+            img = images[i]
+            
+            # Convert to numpy and scale to [0, 255]
+            img_np = img.cpu().numpy()
+            
+            # Handle grayscale (single channel)
+            if img_np.shape[0] == 1:
+                img_np = img_np[0]  # Remove channel dimension -> [H, W]
+                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+                pil_img = Image.fromarray(img_np, mode='L')  # Grayscale
             else:
-                embeddings = outputs[0][:, 0]  # Fallback
+                # RGB image - convert to grayscale for BioViL (expects chest X-rays in grayscale)
+                img_np = img_np.transpose(1, 2, 0)  # [C, H, W] -> [H, W, C]
+                img_np = (img_np * 255).clip(0, 255).astype(np.uint8)
+                pil_img = Image.fromarray(img_np, mode='RGB').convert('L')  # Convert to grayscale
+            
+            pil_images.append(pil_img)
 
-        except TypeError:
-            # If that fails, it might need processor
-            if hasattr(self, 'biovil_processor'):
-                # Process images through the processor
-                inputs = self.biovil_processor(images=images, return_tensors="pt")
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
-                outputs = self.biovil_model(**inputs)
-                embeddings = outputs.pooler_output if hasattr(outputs, 'pooler_output') else outputs[0][:, 0]
-            else:
-                raise
+        # Process images in batches to avoid OOM
+        all_embeddings = []
+        for i in range(0, len(pil_images), batch_size):
+            batch_pil = pil_images[i:i + batch_size]
+            
+            # Apply BioViL transform (includes resize, normalize, etc.)
+            batch = torch.stack([self.biovil_transform(img) for img in batch_pil])
+            batch = batch.to(self.device)
+
+            # Extract embeddings using the inference engine
+            output = self.biovil_model(batch)  # Returns ImageModelOutput
+            batch_embeddings = output.projected_global_embedding  # [B, joint_feature_size]
+            
+            # L2 normalize (recommended for similarity computation)
+            batch_embeddings = F.normalize(batch_embeddings, p=2, dim=-1)
+            
+            # Move to CPU to save GPU memory
+            all_embeddings.append(batch_embeddings.cpu())
+            
+            # Clear GPU cache
+            del batch, output, batch_embeddings
+            torch.cuda.empty_cache()
+        
+        # Concatenate all embeddings and move back to device
+        embeddings = torch.cat(all_embeddings, dim=0).to(self.device)
 
         return embeddings
 

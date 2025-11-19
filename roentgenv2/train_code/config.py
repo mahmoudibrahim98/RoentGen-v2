@@ -135,6 +135,36 @@ class BaseConfig:
     hcn_kl_anneal_steps: int = 10000
     # Weight for compositional consistency loss
     hcn_comp_weight: float = 0.01
+    # Weight for auxiliary loss
+    hcn_aux_weight: float = 0.1
+    # ====== Validation Parameters ======
+    # Whether to run validation during training
+    run_validation: bool = False
+    # Run validation every N steps
+    validation_steps: int = 2500
+    # Number of validation samples to use (-1 for all)
+    num_validation_samples: int = 100
+    # Batch size for validation generation (number of images generated in parallel)
+    val_batch_size: int = 1
+    # Path to validation CSV file
+    validation_csv: str = None
+    # Path to real validation images directory
+    validation_images_dir: str = None
+    # Path to sex model checkpoint for validation
+    validation_sex_model_path: str = None
+    # Number of images to generate per validation prompt
+    validation_num_images_per_prompt: int = 4
+    # Guidance scale for validation generation
+    validation_guidance_scale: float = 7.5
+    # Number of inference steps for validation
+    validation_num_inference_steps: int = 50
+    # Whether to save validation images
+    validation_save_images: bool = False
+    # Batch size for loading and processing validation images when computing metrics (to avoid OOM)
+    validation_metrics_batch_size: int = 32
+    # Whether to compute subgroup-specific metrics (FID, MS-SSIM, BioViL per sex/race/age and intersectional subgroups)
+    # This can significantly increase validation time, so it's disabled by default
+    compute_subgroup_metrics: bool = False
 
     def get_config(self):
         return self.__dict__
