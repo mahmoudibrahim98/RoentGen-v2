@@ -151,8 +151,12 @@ def categorize_metrics(metrics_dict):
     
     return main_metrics, dict(subgroup_metrics), dict(intersectional_metrics)
 
-def plot_main_metrics_comparison(models_data, output_path):
-    """Plot comparison of main metrics across models."""
+def plot_main_metrics_comparison(models_data, output_dir, step=None):
+    """Plot comparison of main metrics across models, split into themed figures."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    step_suffix = f"_step_{step}" if step is not None else ""
+    step_label = f" (Step {step})" if step is not None else ""
     # Extract main metrics
     main_metrics_all = {}
     for model_name, metrics in models_data.items():
@@ -165,54 +169,49 @@ def plot_main_metrics_comparison(models_data, output_path):
         all_metric_names.update(metrics.keys())
     
     # Group metrics by category
-    fidelity_metrics = ['val/fid', 'val/fid_radimagenet']
-    similarity_metrics = ['val/biovil_similarity', 'val/ms_ssim']
-    disease_metrics = ['val/mean_auroc', 'val/Atelectasis', 'val/Cardiomegaly', 'val/Edema', 'val/Pneumothorax', 'val/Effusion']
-    demographic_metrics = ['val/sex_accuracy', 'val/race_accuracy', 'val/age_rmse']
-    
-    metric_groups = [
-        ('Fidelity Metrics', fidelity_metrics),
-        ('Similarity Metrics', similarity_metrics),
-        ('Disease Classification', disease_metrics),
-        ('Demographic Prediction', demographic_metrics)
-    ]
-    
     model_names = list(models_data.keys())
-    colors = ['#2E86AB', '#A23B72', '#F18F01']  # Blue, Purple, Orange
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#6C5B7B', '#20BF55', '#F6511D', '#FFB300', '#008080']
     short_names = {
         'roentgen_v2_baseline': 'Baseline',
         '2_hcn_without_uncertainty': 'HCN (no uncertainty)',
-        '0_full_hcn': 'Full HCN'
+        '0_full_hcn': 'Full HCN',
+        '0a_full_hcn_strong': 'Full HCN (strong)',
+        'baseline': 'Baseline',
+        'wrong_hcn': 'HCN (orig v1)',
+        '0b_full_hcn_strongest': 'Full HCN (strongest)',
     }
     
-    # Count total metrics to plot
-    total_metrics = 0
-    for group_name, metrics_list in metric_groups:
-        metrics_list = [m for m in metrics_list if m in all_metric_names]
-        total_metrics += len(metrics_list)
+    groups = [
+        (
+            'model_comparison_main_metrics_quality',
+            ['val/fid', 'val/fid_radimagenet', 'val/biovil_similarity', 'val/ms_ssim', 'val/mean_auroc'],
+            f'Quality & Similarity Metrics{step_label}'
+        ),
+        (
+            'model_comparison_main_metrics_auc',
+            ['val/Atelectasis', 'val/Cardiomegaly', 'val/Edema', 'val/Pneumothorax', 'val/Effusion'],
+            f'Disease AUROC Metrics{step_label}'
+        ),
+        (
+            'model_comparison_main_metrics_demographics',
+            ['val/sex_accuracy', 'val/race_accuracy', 'val/age_rmse'],
+            f'Demographic Prediction Metrics{step_label}'
+        )
+    ]
     
-    if total_metrics == 0:
-        print("No main metrics found to plot")
-        return
-    
-    # Calculate grid size
-    n_cols = 3
-    n_rows = (total_metrics + n_cols - 1) // n_cols
-    
-    # Create figure with subplots for each group
-    fig = plt.figure(figsize=(20, 6 * n_rows))
-    
-    plot_idx = 1
-    for group_name, metrics_list in metric_groups:
-        # Filter to existing metrics
-        metrics_list = [m for m in metrics_list if m in all_metric_names]
-        if not metrics_list:
-            continue
+    def _plot_group(metric_names, title, output_name):
+        existing_metrics = [m for m in metric_names if m in all_metric_names]
+        if not existing_metrics:
+            print(f"No metrics found for {output_name}. Skipping.")
+            return False
         
-        n_metrics = len(metrics_list)
-        for idx, metric_name in enumerate(metrics_list):
-            ax = plt.subplot(n_rows, n_cols, plot_idx)
-            
+        n_cols = min(3, len(existing_metrics))
+        n_rows = (len(existing_metrics) + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows))
+        axes = np.array(axes).reshape(-1)
+        
+        for idx, metric_name in enumerate(existing_metrics):
+            ax = axes[idx]
             values = []
             for model_name in model_names:
                 value = main_metrics_all[model_name].get(metric_name)
@@ -221,57 +220,62 @@ def plot_main_metrics_comparison(models_data, output_path):
                 else:
                     values.append(None)
             
-            # Create bar plot
             x_pos = np.arange(len(model_names))
-            bars = ax.bar(x_pos, values, color=colors[:len(model_names)], alpha=0.8, edgecolor='black', linewidth=2)
+            bar_colors = colors[:len(model_names)]
+            if len(bar_colors) < len(model_names):
+                bar_colors = None
+            bars = ax.bar(x_pos, values, color=bar_colors, alpha=0.8, edgecolor='black', linewidth=2)
             
-            # Add value labels on bars
-            for i, (bar, val) in enumerate(zip(bars, values)):
-                if val is not None:
-                    height = bar.get_height()
-                    # Format based on metric scale
-                    if 'fid' in metric_name.lower():
-                        label = f'{val:.1f}'
-                    elif 'rmse' in metric_name.lower():
-                        label = f'{val:.2f}'
-                    else:
-                        label = f'{val:.3f}'
-                    ax.text(bar.get_x() + bar.get_width()/2., height,
-                           label,
-                           ha='center', va='bottom', fontsize=11, fontweight='bold')
+            for bar, val in zip(bars, values):
+                if val is None:
+                    continue
+                height = bar.get_height()
+                if 'fid' in metric_name.lower():
+                    label = f'{val:.1f}'
+                elif 'rmse' in metric_name.lower():
+                    label = f'{val:.2f}'
+                else:
+                    label = f'{val:.3f}'
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                        label,
+                        ha='center', va='bottom', fontsize=11, fontweight='bold')
             
-            # Highlight best value
             valid_values = [(i, v) for i, v in enumerate(values) if v is not None]
             if valid_values:
                 if 'fid' in metric_name.lower() or 'rmse' in metric_name.lower():
-                    # Lower is better
-                    best_idx, best_val = min(valid_values, key=lambda x: x[1])
+                    best_idx, _ = min(valid_values, key=lambda x: x[1])
                 else:
-                    # Higher is better
-                    best_idx, best_val = max(valid_values, key=lambda x: x[1])
+                    best_idx, _ = max(valid_values, key=lambda x: x[1])
                 bars[best_idx].set_edgecolor('gold')
                 bars[best_idx].set_linewidth(3)
             
             ax.set_xticks(x_pos)
-            ax.set_xticklabels([short_names.get(name, name.replace('_', ' ').title()) for name in model_names], 
-                             rotation=15, ha='right', fontsize=10)
+            ax.set_xticklabels(
+                [short_names.get(name, name.replace('_', ' ').title()) for name in model_names],
+                rotation=15, ha='right', fontsize=10
+            )
             ax.set_ylabel('Value', fontsize=10)
             metric_display = metric_name.replace('val/', '').replace('_', ' ').title()
             ax.set_title(metric_display, fontsize=11, fontweight='bold')
             ax.grid(True, alpha=0.3, axis='y')
-            
-            plot_idx += 1
+        
+        for idx in range(len(existing_metrics), len(axes)):
+            axes[idx].axis('off')
+        
+        plt.suptitle(title, fontsize=16, fontweight='bold', y=0.995)
+        plt.tight_layout(rect=[0, 0, 1, 0.98])
+        output_path = output_dir / f'{output_name}{step_suffix}.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Saved {title} to {output_path}")
+        plt.close(fig)
+        return True
     
-    # Hide unused subplots
-    for idx in range(plot_idx, n_rows * n_cols + 1):
-        ax = plt.subplot(n_rows, n_cols, idx)
-        ax.axis('off')
+    plotted = False
+    for output_name, metric_names, title in groups:
+        plotted = _plot_group(metric_names, title, output_name) or plotted
     
-    plt.suptitle('Main Metrics Comparison Across Models (Step 12500)', fontsize=16, fontweight='bold', y=0.995)
-    plt.tight_layout(rect=[0, 0, 1, 0.99])
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"Saved main metrics comparison to {output_path}")
-    plt.close()
+    if not plotted:
+        print("No main metrics found to plot")
 
 def plot_subgroup_metrics_comparison(models_data, output_path, subgroup_sizes=None):
     """Plot comparison of subgroup metrics across models."""
@@ -295,11 +299,15 @@ def plot_subgroup_metrics_comparison(models_data, output_path, subgroup_sizes=No
         return
     
     model_names = list(models_data.keys())
-    colors = ['#2E86AB', '#A23B72', '#F18F01']
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#6C5B7B', '#20BF55', '#F6511D', '#FFB300', '#008080']
     short_names = {
         'roentgen_v2_baseline': 'Baseline',
         '2_hcn_without_uncertainty': 'HCN (no uncertainty)',
-        '0_full_hcn': 'Full HCN'
+        '0_full_hcn': 'Full HCN',
+        '0a_full_hcn_strong': 'Full HCN (strong)',
+        '0b_full_hcn_strongest': 'Full HCN (strongest)',
+        'wrong_hcn': 'HCN (orig v1)',
+        'baseline': 'Baseline',
     }
     
     # Create separate plots for each metric type
@@ -398,11 +406,15 @@ def plot_intersectional_metrics_comparison(models_data, output_path, intersectio
         return
     
     model_names = list(models_data.keys())
-    colors = ['#2E86AB', '#A23B72', '#F18F01']
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#6C5B7B', '#20BF55', '#F6511D', '#FFB300', '#008080']
     short_names = {
         'roentgen_v2_baseline': 'Baseline',
         '2_hcn_without_uncertainty': 'HCN (no uncertainty)',
-        '0_full_hcn': 'Full HCN'
+        '0_full_hcn': 'Full HCN',
+        '0a_full_hcn_strong': 'Full HCN (strong)',
+        '0b_full_hcn_strongest': 'Full HCN (strongest)',
+        'wrong_hcn': 'HCN (orig v1)',
+        'baseline': 'Baseline',
     }
     
     # Create separate plots for each metric, grouped by age group
@@ -569,13 +581,24 @@ def main():
     args = parser.parse_args()
     
     # Model paths
-    base_dir = Path(__file__).parent / 'output'
+    # base_dir = Path(__file__).parent / 'output'
+    # models = {
+    #     'roentgen_v2_baseline': base_dir / 'roentgen_v2_baseline' / 'validation_manifest.json',
+    #     '2_hcn_without_uncertainty': base_dir / '2_hcn_without_uncertainty' / 'validation_manifest.json',
+    #     '0_full_hcn': base_dir / '0_full_hcn' / 'validation_manifest.json'
+    # }
+    base_dir = Path(__file__).parent / 'outputs/output'
+    base_dir_v2 = Path(__file__).parent / 'outputs/output_v2'
+    base_dir_v4 = Path(__file__).parent / 'outputs/output_v4'
+    base_dir_v3 = Path(__file__).parent / 'outputs/output_v3'
     models = {
-        'roentgen_v2_baseline': base_dir / 'roentgen_v2_baseline' / 'validation_manifest.json',
-        '2_hcn_without_uncertainty': base_dir / '2_hcn_without_uncertainty' / 'validation_manifest.json',
-        '0_full_hcn': base_dir / '0_full_hcn' / 'validation_manifest.json'
+        'baseline': base_dir / '1_baseline' / 'validation_manifest.json',
+        'wrong_hcn': base_dir / '0_full_hcn' / 'validation_manifest.json',
+        '0_full_hcn': base_dir_v2 / '0_full_hcn' / 'validation_manifest.json',
+        '0a_full_hcn_strong': base_dir_v2 / '0a_full_hcn_strong' / 'validation_manifest.json',
+        '0b_full_hcn_strongest': base_dir_v2 / '0b_full_hcn_strongest' / 'validation_manifest.json',
+        
     }
-    
     # Try to compute subgroup sizes from validation data
     validation_data_path = args.validation_data
     if validation_data_path is None:
@@ -633,7 +656,8 @@ def main():
     # Main metrics comparison
     plot_main_metrics_comparison(
         models_data, 
-        output_dir / f'model_comparison_main_metrics_step_{args.step}.png'
+        output_dir,
+        step=args.step
     )
     
     # Subgroup metrics comparison

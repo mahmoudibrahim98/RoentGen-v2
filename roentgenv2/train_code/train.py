@@ -132,6 +132,24 @@ def main(args):
 
     # Load HCN (Hierarchical Conditioner Network)
     hcn = load_hcn(args, logger)
+    
+    # Load DemographicEncoder (V4)
+    from demographic_encoder import load_demographic_encoder
+    demographic_encoder = load_demographic_encoder(args, logger)
+    
+    # Warn if both HCN and DemographicEncoder are active (redundant)
+    if hcn is not None and demographic_encoder is not None:
+        logger.warning(
+            "⚠️  Both HCN and DemographicEncoder are enabled. "
+            "This will add 2 demographic tokens to the context (HCN + DemographicEncoder). "
+            "Consider using only one for cleaner conditioning."
+        )
+
+    fair_controller = None
+    if args.use_fairdiffusion:
+        from fairdiffusion import FairDiffusionController
+
+        fair_controller = FairDiffusionController(args, accelerator, logger)
 
     # Freeze vae and text_encoder
     if args.image_type == "pt":
@@ -146,6 +164,10 @@ def main(args):
     # HCN is trainable
     if hcn is not None:
         hcn.requires_grad_(True)
+    
+    # DemographicEncoder is trainable
+    if demographic_encoder is not None:
+        demographic_encoder.requires_grad_(True)
     ##########################################################
     if is_xformers_available():
         try:
@@ -201,6 +223,11 @@ def main(args):
     if hcn is not None:
         params_to_optimize = itertools.chain(params_to_optimize, hcn.parameters())
         logger.info("Adding HCN parameters to optimizer")
+    
+    # Add DemographicEncoder parameters to optimizer
+    if demographic_encoder is not None:
+        params_to_optimize = itertools.chain(params_to_optimize, demographic_encoder.parameters())
+        logger.info("Adding DemographicEncoder parameters to optimizer")
 
     optimizer = optimizer_class(
         params_to_optimize,
@@ -231,6 +258,8 @@ def main(args):
             tokenizer=tokenizer,
             data_filter_file=args.data_filter_file,
             use_hcn=args.use_hcn,
+            use_fairdiffusion=args.use_fairdiffusion,
+            use_demographic_encoder=args.use_demographic_encoder,
         )
 
         train_dataloader = torch.utils.data.DataLoader(
@@ -247,6 +276,8 @@ def main(args):
             tokenizer=tokenizer,
             data_filter_file=args.data_filter_file,
             use_hcn=args.use_hcn,
+            use_fairdiffusion=args.use_fairdiffusion,
+            use_demographic_encoder=args.use_demographic_encoder,
         )
 
         with accelerator.main_process_first():
@@ -284,37 +315,37 @@ def main(args):
 
     ##########################################################
     ### Prepare everything with accelerator ###
+    # Build list of models to prepare
+    models_to_prepare = [unet]
     if args.train_text_encoder:
-        if hcn is not None:
-            (
-                unet,
-                text_encoder,
-                hcn,
-                optimizer,
-                train_dataloader,
-                lr_scheduler,
-            ) = accelerator.prepare(
-                unet, text_encoder, hcn, optimizer, train_dataloader, lr_scheduler
-            )
-        else:
-            (
-                unet,
-                text_encoder,
-                optimizer,
-                train_dataloader,
-                lr_scheduler,
-            ) = accelerator.prepare(
-                unet, text_encoder, optimizer, train_dataloader, lr_scheduler
-            )
-    else:
-        if hcn is not None:
-            unet, hcn, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                unet, hcn, optimizer, train_dataloader, lr_scheduler
-            )
-        else:
-            unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-                unet, optimizer, train_dataloader, lr_scheduler
-            )
+        models_to_prepare.append(text_encoder)
+    if hcn is not None:
+        models_to_prepare.append(hcn)
+    if demographic_encoder is not None:
+        models_to_prepare.append(demographic_encoder)
+    
+    # Add optimizer, dataloader, and scheduler
+    models_to_prepare.extend([optimizer, train_dataloader, lr_scheduler])
+    
+    # Prepare all models
+    prepared = accelerator.prepare(*models_to_prepare)
+    
+    # Unpack prepared models
+    idx = 0
+    unet = prepared[idx]
+    idx += 1
+    if args.train_text_encoder:
+        text_encoder = prepared[idx]
+        idx += 1
+    if hcn is not None:
+        hcn = prepared[idx]
+        idx += 1
+    if demographic_encoder is not None:
+        demographic_encoder = prepared[idx]
+        idx += 1
+    optimizer = prepared[idx]
+    train_dataloader = prepared[idx + 1]
+    lr_scheduler = prepared[idx + 2]
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
@@ -470,7 +501,12 @@ def main(args):
         lr_scheduler,
         ema_unet,
         hcn,  # Add HCN parameter
+        demographic_encoder,  # Add DemographicEncoder parameter (V4)
+        fair_controller=fair_controller,
     )
+
+    if fair_controller is not None:
+        fair_controller.finalize()
 
     accelerator.wait_for_everyone()
 
@@ -490,6 +526,7 @@ def main(args):
             unet_config_changed,
             unet_config,
             hcn,  # Add HCN parameter
+            demographic_encoder,  # Add DemographicEncoder parameter (V4)
         )
     ##########################################################
 

@@ -23,6 +23,7 @@ def create_and_save_pipeline(
     unet_config_changed,
     unet_config,
     hcn=None,  # Hierarchical Conditioner Network
+    demographic_encoder=None,  # V4: Demographic Encoder
 ):
     # Unwrap unet
     unet = accelerator.unwrap_model(unet)
@@ -86,6 +87,14 @@ def create_and_save_pipeline(
             hcn_save_path = os.path.join(args.output_dir, "hcn")
             hcn_unwrapped.save_pretrained(hcn_save_path)
             print(f"HCN saved to {hcn_save_path}")
+        
+        # === Save DemographicEncoder ===
+        if demographic_encoder is not None:
+            print("Saving DemographicEncoder (V4)...")
+            demo_encoder_unwrapped = accelerator.unwrap_model(demographic_encoder)
+            demo_encoder_save_path = os.path.join(args.output_dir, "demographic_encoder")
+            demo_encoder_unwrapped.save_pretrained(demo_encoder_save_path)
+            print(f"DemographicEncoder saved to {demo_encoder_save_path}")
 
     # CHECK: do i still need this?
     elif (not args.do_not_save_weights) and (args.save_only_modified_weights):

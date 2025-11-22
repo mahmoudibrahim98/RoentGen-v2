@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=validation_monitor
-#SBATCH --output=logs_v2/0b_full_hcn_strongest/validation_%j.out
-#SBATCH --error=logs_v2/0b_full_hcn_strongest/validation_%j.err
+#SBATCH --output=logs/logs_v1.5/1_train_hcn_with_dropout_no_aux_loss/validation_%j.out
+#SBATCH --error=logs/logs_v1.5/1_train_hcn_with_dropout_no_aux_loss/validation_%j.err
 #SBATCH --time=7-00:00:00          # 2 days (validation can run longer)
 #SBATCH --nodes=1                  # Single node
 #SBATCH --ntasks-per-node=1
@@ -68,7 +68,7 @@ mkdir -p logs
 cd /home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2
 
 # Config file path (adjust as needed)
-CONFIG_FILE="${1:-configs/test_config.yaml}"  # Use first argument or default
+CONFIG_FILE="${1:-configs/v1.5/1_train_hcn_with_dropout_no_aux_loss.yaml}"  # Use first argument or default
 
 # Check if config file exists
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -79,9 +79,9 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # Optional: Check interval, manifest file, load images flag, and stop-at-step arguments
-CHECK_INTERVAL="${2:-1800}"  # Default: 30 minutes
+CHECK_INTERVAL="${2:-300}"  # Default: 30 minutes
 MANIFEST_FILE="${3:-validation_manifest.json}"
-LOAD_IMAGES_FLAG="${4:-}"  # Optional: set to "1" or "true" to load pre-generated images
+LOAD_IMAGES_FLAG="${4:-0}"  # Optional: set to "1" or "true" to load pre-generated images
 STOP_AT_STEP="${5:-}"      # Optional: if set, stop validation after this global step
 
 # Launch validation monitor
@@ -134,4 +134,3 @@ echo "=========================================="
 
 # Exit with the same code as the validation script
 exit $EXIT_CODE
-

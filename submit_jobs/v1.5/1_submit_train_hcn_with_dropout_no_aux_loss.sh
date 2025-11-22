@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=train
-#SBATCH --output=logs_v2/0b_full_hcn_strongest/training_%j.out
-#SBATCH --error=logs_v2/0b_full_hcn_strongest/training_%j.err
+#SBATCH --output=logs/logs_v1.5/1_train_hcn_with_dropout_no_aux_loss/training_%j.out
+#SBATCH --error=logs/logs_v1.5/1_train_hcn_with_dropout_no_aux_loss/training_%j.err
 #SBATCH --time=7-00:00:00          # 7 days (adjust as needed)
 #SBATCH --nodes=1                  # Single node
 #SBATCH --ntasks-per-node=1
@@ -40,7 +40,7 @@ echo "Number of GPUs: $(python -c 'import torch; print(torch.cuda.device_count()
 
 # Set environment variables for distributed training
 # For single-node multi-GPU, we don't need InfiniBand - use local GPU interconnects
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,
 export NCCL_DEBUG=WARN  # Set to INFO for debugging, WARN for less verbose
 export NCCL_IB_DISABLE=1  # Disable InfiniBand (not needed for single-node)
 export NCCL_P2P_DISABLE=0  # Enable P2P (NVLink/PCIe) for single-node
@@ -53,10 +53,10 @@ export NCCL_SHM_DISABLE=0  # Enable shared memory
 cd /home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2
 
 # Create logs directory if it doesn't exist
-mkdir -p logs_v2/0b_full_hcn_strongest
+mkdir -p logs/logs_v1.5/1_train_hcn_with_dropout_no_aux_loss
 
 # Config file path (adjust as needed)
-CONFIG_FILE="configs/0b_train_full_hcn_strongest.yaml"
+CONFIG_FILE="configs/v1.5/1_train_hcn_with_dropout_no_aux_loss.yaml"
 
 # Check if config file exists
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -87,5 +87,3 @@ echo "=========================================="
 
 # Exit with the same code as the training script
 exit $EXIT_CODE
-
-

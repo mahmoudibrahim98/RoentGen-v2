@@ -1,0 +1,62 @@
+pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base"
+pretrained_text_encoder_name_or_path: null
+train_text_encoder: True
+
+embedding_method: "last_hidden_state"
+enforce_tokenizer_max_sentence_length: 77
+output_dir: "./output_v3/1_dual_encoder_v3"
+seed: 42
+resolution: 512
+
+train_batch_size: 16
+max_train_steps: 30000
+learning_rate: 1.0e-5
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+use_ema: true
+lr_scheduler: "cosine"
+lr_warmup_steps: 500
+gradient_checkpointing: true
+
+use_wds_dataset: true
+url_root: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/training_data"
+image_type: "pt"
+
+checkpointing_steps: 2500
+checkpoints_total_limit: None
+resume_from_checkpoint: "latest"
+
+use_hcn: false
+hcn_d_node: 256
+hcn_d_ctx: 1024
+hcn_dropout: 0.1
+hcn_use_uncertainty: true
+hcn_num_age_bins: 5
+hcn_num_sex: 2
+hcn_num_race: 4
+hcn_kl_weight: 0.005
+hcn_kl_anneal_steps: 5000
+hcn_comp_weight: 0.01
+hcn_aux_weight: 0.1
+
+# V3 dual text-conditioning settings
+use_dual_text_conditioner: true
+demographic_prompt_max_length: 48
+
+run_validation: true
+validation_steps: 2500
+num_validation_samples: -1
+val_batch_size: 8
+validation_csv: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/val_data"
+validation_images_dir: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/val_data"
+validation_sex_model_path: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/pretrained_models/sex/resnet-all/epoch=13-step=7125.ckpt"
+validation_num_images_per_prompt: 1
+validation_guidance_scale: 7.5
+validation_num_inference_steps: 75
+validation_save_images: true
+validation_metrics_batch_size: 8
+compute_subgroup_metrics: true
+
+logging_dir: "logs"
+report_to: "wandb"
+

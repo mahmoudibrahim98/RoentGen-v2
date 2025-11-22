@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import Dict, List, Optional
 from collections import defaultdict
 import yaml
 import argparse
@@ -137,11 +137,56 @@ class BaseConfig:
     hcn_comp_weight: float = 0.01
     # Weight for auxiliary loss
     hcn_aux_weight: float = 0.1
+    
+    # ====== Demographic Encoder (V4) Parameters ======
+    # Whether to use DemographicEncoder (lightweight embeddings-based conditioning)
+    use_demographic_encoder: bool = False
+    # Hidden dimension for demographic embeddings
+    demo_d_hidden: int = 256
+    # Output dimension (should match text encoder output, e.g., 1024 for SD 2.1)
+    demo_d_output: int = 1024
+    # Dropout probability in demographic encoder MLP
+    demo_dropout: float = 0.1
+    # Number of age bins for categorization
+    demo_num_age_bins: int = 5
+    # Number of sex categories (typically 2: M/F)
+    demo_num_sex: int = 2
+    # Number of race/ethnicity categories
+    demo_num_race: int = 4
+    # Weight for auxiliary demographic classification losses
+    demo_aux_weight: float = 1.0
+    # Whether to use demographic dropout strategy (50% of batches remove demographics from text)
+    demo_use_dropout: bool = False
+    # Dropout probability for removing demographics from text prompt
+    demo_text_dropout_prob: float = 0.5
+    # Step at which to start demographic dropout (allows warm-up period)
+    demo_dropout_start_step: int = 0
+    # Path to pretrained demographic encoder (optional)
+    demographic_encoder_pretrained_path: str = None
+    
+    # ====== FairDiffusion Parameters ======
+    use_fairdiffusion: bool = False
+    fairdiffusion_input_perturbation: float = 0.0
+    fairdiffusion_time_window: int = 250
+    fairdiffusion_exploitation_rate: float = 0.7
+    fairdiffusion_sigma_init: float = 1.0
+    fairdiffusion_sigma_min: float = 0.0
+    fairdiffusion_sigma_max: float = 1.0
+    fairdiffusion_min_instance_weight: float = 0.1
+    fairdiffusion_ucb_beta: float = 0.1
+    fairdiffusion_attribute_fields: List[str] = field(
+        default_factory=lambda: ["race_idx", "sex_idx", "age_idx"]
+    )
+    fairdiffusion_attribute_cardinalities: Dict[str, int] = field(default_factory=dict)
     # ====== Validation Parameters ======
     # Whether to run validation during training
     run_validation: bool = False
     # Run validation every N steps
     validation_steps: int = 2500
+    # Optional offsets applied to each validation interval (e.g., [-1500, 0])
+    validation_schedule_offsets: Optional[List[int]] = None
+    # Optional minimum global step before applying schedule
+    validation_schedule_min_step: Optional[int] = None
     # Number of validation samples to use (-1 for all)
     num_validation_samples: int = 100
     # Batch size for validation generation (number of images generated in parallel)

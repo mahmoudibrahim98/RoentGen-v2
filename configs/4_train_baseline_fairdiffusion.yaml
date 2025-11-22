@@ -1,0 +1,101 @@
+# RoentGen-v2 Training Configuration - Baseline with FairDiffusion
+#
+# This config enables FairDiffusion (fair Bayesian perturbation) without HCN
+# FairDiffusion adaptively reweights training samples based on demographic groups
+# to reduce performance gaps across different demographic attributes
+#
+# ==============================================================================
+# MODEL CONFIGURATION
+# ==============================================================================
+
+pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base" #Pretrained model to start from
+pretrained_text_encoder_name_or_path: null #Pretrained text encoder to start from
+train_text_encoder: True #Whether to train the text encoder
+
+embedding_method: "last_hidden_state" #Embedding method for text conditioning
+enforce_tokenizer_max_sentence_length: 77 #Enforce tokenizer max sentence length
+output_dir: "./output_v2/1_baseline_fairdiffusion" #Output directory for checkpoints and logs
+seed: 42 #Random seed for reproducibility
+resolution: 512 #Image resolution (512 for SD 2.1)
+
+train_batch_size: 16 #Batch size per GPU # adapt 48
+max_train_steps: 30000  #Total training steps # adapt 60000
+learning_rate: 1.0e-5 #Learning rate
+gradient_accumulation_steps: 1 #Gradient accumulation
+mixed_precision: "bf16" #Mixed precision training (fp16, bf16, or no)
+use_ema: true #Use EMA (Exponential Moving Average) for the UNet
+lr_scheduler: "cosine" #Learning rate scheduler
+lr_warmup_steps: 500
+gradient_checkpointing: true #Gradient checkpointing (saves memory at cost of speed) - REQUIRED for large batch sizes with text encoder training
+
+# ==============================================================================
+# DATASET CONFIGURATION
+# ==============================================================================
+
+# Use WebDataset format (set to false for directory-based dataset)
+use_wds_dataset: true #Use WebDataset format (set to false for directory-based dataset)
+url_root: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/training_data" #Path to WebDataset tar files (if use_wds_dataset=true)
+image_type: "pt" #Type of image data ("pt" for pre-encoded latents, or image format)
+
+# ==============================================================================
+# CHECKPOINTING
+# ==============================================================================
+
+checkpointing_steps: 2500 #Save checkpoint every N steps # adapt  500
+checkpoints_total_limit: None #Maximum number of checkpoints to keep (older ones are deleted)
+resume_from_checkpoint: "latest" #Resume training from checkpoint (use "latest" or path to checkpoint dir)
+
+# ==============================================================================
+# HCN (HIERARCHICAL CONDITIONER NETWORK)
+# ==============================================================================
+# HCN is disabled for baseline FairDiffusion training
+# FairDiffusion will parse demographics from prompts automatically
+use_hcn: false #Disable HCN for baseline training
+# These values are still used by FairDiffusion to infer attribute cardinalities
+hcn_num_age_bins: 5
+hcn_num_sex: 2
+hcn_num_race: 4
+
+# ==============================================================================
+# FAIRDIFFUSION (Fair Bayesian Perturbation)
+# ==============================================================================
+# Enable FairDiffusion for adaptive fairness-aware training
+# FairDiffusion uses Bayesian optimization to adaptively reweight samples
+# based on demographic groups to reduce performance gaps
+use_fairdiffusion: true #Enable FairDiffusion adaptive reweighting
+fairdiffusion_input_perturbation: 0.1 #Input noise perturbation scale (recommended: 0.1)
+fairdiffusion_time_window: 250 #Steps between Bayesian optimization updates
+fairdiffusion_exploitation_rate: 0.7 #Exploration vs exploitation balance (0-1, higher = more exploitation)
+fairdiffusion_sigma_init: 1.0 #Initial sigma value for perturbation sampling
+fairdiffusion_sigma_min: 0.0 #Minimum sigma bound
+fairdiffusion_sigma_max: 1.0 #Maximum sigma bound
+fairdiffusion_min_instance_weight: 0.1 #Minimum per-sample weight (prevents extreme downweighting)
+fairdiffusion_ucb_beta: 0.1 #Upper Confidence Bound beta parameter for BO acquisition
+# Attribute fields to use for fairness (demographics parsed from prompts)
+fairdiffusion_attribute_fields: ["race_idx", "sex_idx", "age_idx"]
+# Optional: override attribute cardinalities if different from defaults
+# fairdiffusion_attribute_cardinalities: {}
+
+# ==============================================================================
+# VALIDATION CONFIGURATION
+# ==============================================================================
+
+run_validation: true #Enable validation during training
+validation_steps: 2500 #Run validation every N steps # adapt 2500
+num_validation_samples: -1 #Number of validation samples to use per validation pass
+val_batch_size: 8 #Batch size for validation generation (number of images generated in parallel)
+validation_csv: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/val_data" #Path to validation data
+validation_images_dir: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/val_data" #Path to real validation images directory
+validation_sex_model_path: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/pretrained_models/sex/resnet-all/epoch=13-step=7125.ckpt" #Path to sex prediction model checkpoint (optional)
+validation_num_images_per_prompt: 1 #Generation parameters for validation
+validation_guidance_scale: 7.5 #Generation parameters for validation
+validation_num_inference_steps: 75 #Generation parameters for validation
+validation_save_images: true #Whether to save generated validation images
+validation_metrics_batch_size: 8 #Batch size for validation metrics computation
+compute_subgroup_metrics: true #Enable subgroup metrics (FID, MS-SSIM, BioViL per sex/race/age and intersectional subgroups). Warning: This significantly increases computation time.
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+logging_dir: "logs" #Logging directory
+report_to: "wandb" #Where to report logs (wandb, tensorboard, or none)
+

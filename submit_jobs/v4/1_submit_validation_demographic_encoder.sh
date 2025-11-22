@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=validation_monitor
-#SBATCH --output=logs_v2/0b_full_hcn_strongest/validation_%j.out
-#SBATCH --error=logs_v2/0b_full_hcn_strongest/validation_%j.err
+#SBATCH --output=logs/logs_v4/1_demographic_encoder/validation_%j.out
+#SBATCH --error=logs/logs_v4/1_demographic_encoder/validation_%j.err
 #SBATCH --time=7-00:00:00          # 2 days (validation can run longer)
 #SBATCH --nodes=1                  # Single node
 #SBATCH --ntasks-per-node=1
@@ -68,7 +68,7 @@ mkdir -p logs
 cd /home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2
 
 # Config file path (adjust as needed)
-CONFIG_FILE="${1:-configs/test_config.yaml}"  # Use first argument or default
+CONFIG_FILE="${1:-configs/v4/1_train_demographic_encoder.yaml}"  # Use first argument or default
 
 # Check if config file exists
 if [ ! -f "$CONFIG_FILE" ]; then

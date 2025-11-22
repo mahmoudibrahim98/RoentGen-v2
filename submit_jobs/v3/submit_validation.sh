@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=validation_monitor
-#SBATCH --output=logs_v2/0b_full_hcn_strongest/validation_%j.out
-#SBATCH --error=logs_v2/0b_full_hcn_strongest/validation_%j.err
+#SBATCH --output=logs_v3/1_dual_encoder_v3/validation_%j.out
+#SBATCH --error=logs_v3/1_dual_encoder_v3/validation_%j.err
 #SBATCH --time=7-00:00:00          # 2 days (validation can run longer)
 #SBATCH --nodes=1                  # Single node
 #SBATCH --ntasks-per-node=1

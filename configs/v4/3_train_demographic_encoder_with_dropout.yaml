@@ -1,0 +1,119 @@
+# RoentGen V4: Demographic Encoder with Dropout Strategy
+#
+# This config enables the demographic dropout strategy to force the UNet to use
+# the demographic encoder. 50% of batches will have demographics removed from text.
+#
+# Use this if the basic version (without dropout) shows poor demographic accuracy.
+#
+# ==============================================================================
+# MODEL CONFIGURATION
+# ==============================================================================
+
+pretrained_model_name_or_path: "stabilityai/stable-diffusion-2-1-base"
+pretrained_text_encoder_name_or_path: null
+train_text_encoder: True
+
+embedding_method: "last_hidden_state"
+enforce_tokenizer_max_sentence_length: 77
+output_dir: "./outputs/output_v4/3_demographic_encoder_with_dropout"
+seed: 42
+resolution: 512
+
+train_batch_size: 16
+max_train_steps: 30000
+learning_rate: 1.0e-5
+gradient_accumulation_steps: 1
+mixed_precision: "bf16"
+use_ema: true
+lr_scheduler: "cosine"
+lr_warmup_steps: 500
+gradient_checkpointing: true
+
+# ==============================================================================
+# DATASET CONFIGURATION
+# ==============================================================================
+
+use_wds_dataset: true
+url_root: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/training_data"
+image_type: "pt"
+
+# ==============================================================================
+# CHECKPOINTING
+# ==============================================================================
+
+checkpointing_steps: 500
+checkpoints_total_limit: None
+resume_from_checkpoint: "latest"
+
+# ==============================================================================
+# HCN (DISABLED FOR V4)
+# ==============================================================================
+
+use_hcn: false
+hcn_d_node: 256
+hcn_d_ctx: 1024
+hcn_dropout: 0.1
+hcn_use_uncertainty: true
+hcn_num_age_bins: 5
+hcn_num_sex: 2
+hcn_num_race: 4
+hcn_kl_weight: 0.005
+hcn_kl_anneal_steps: 5000
+hcn_comp_weight: 0.01
+hcn_aux_weight: 0.1
+
+# ==============================================================================
+# DEMOGRAPHIC ENCODER (V4) - WITH DROPOUT STRATEGY
+# ==============================================================================
+
+use_demographic_encoder: true
+
+# Architecture parameters
+demo_d_hidden: 256
+demo_d_output: 1024
+demo_dropout: 0.1
+
+# Number of categories
+demo_num_age_bins: 5
+demo_num_sex: 2
+demo_num_race: 4
+
+# Loss weights (strong supervision)
+demo_aux_weight: 1.0
+
+# Dropout strategy - ENABLED
+demo_use_dropout: true          # Enable demographic dropout
+demo_text_dropout_prob: 0.5     # 50% of batches drop demographics from text
+demo_dropout_start_step: 5000   # Start after 5k warmup steps
+
+demographic_encoder_pretrained_path: null
+
+# ==============================================================================
+# VALIDATION CONFIGURATION
+# ==============================================================================
+
+run_validation: true
+validation_steps: 2500
+validation_schedule_offsets:
+  - -1500
+  - 0
+num_validation_samples: -1
+val_batch_size: 8
+validation_csv: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/val_data"
+validation_images_dir: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/real_data/val_data"
+validation_sex_model_path: "/home/vito/ibrahimm/projects/AI4Health/notebooks/ibrahimm/Generative-Models/images/Chest_XRay/RoentGen-v2/pretrained_models/sex/resnet-all/epoch=13-step=7125.ckpt"
+validation_num_images_per_prompt: 1
+validation_guidance_scale: 7.5
+validation_num_inference_steps: 75
+validation_save_images: true
+validation_metrics_batch_size: 8
+compute_subgroup_metrics: true
+
+# ==============================================================================
+# LOGGING
+# ==============================================================================
+
+logging_dir: "logs"
+report_to: "wandb"
+
+

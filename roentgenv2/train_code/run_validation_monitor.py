@@ -62,6 +62,40 @@ class ValidationConfig:
     validation_num_inference_steps: Optional[int] = None
 
 
+def is_step_in_validation_schedule(
+    step: int,
+    base_step: Optional[int],
+    offsets: Optional[List[int]] = None,
+    min_step: Optional[int] = None,
+) -> bool:
+    """Return True if a checkpoint step should be validated under the custom schedule."""
+    if step <= 0:
+        return False
+
+    if min_step is not None and step < min_step:
+        return False
+
+    if base_step is None or base_step <= 0:
+        return True
+
+    if not offsets:
+        return step % base_step == 0
+
+    for offset in offsets:
+        try:
+            offset_int = int(offset)
+        except (TypeError, ValueError):
+            continue
+
+        candidate = step - offset_int
+        if candidate <= 0:
+            continue
+        if candidate % base_step == 0:
+            return True
+
+    return False
+
+
 def load_config(file_path):
     """Load YAML config file."""
     with open(file_path, "r") as stream:
@@ -150,6 +184,17 @@ class CheckpointMonitor:
             "success": success,
             "metrics": metrics if success else None,
             "num_images": num_images,
+        })
+        self.validated_checkpoints[checkpoint_dir.name] = entry
+        self._save_manifest()
+
+    def mark_skipped(self, checkpoint_dir: Path, reason: str):
+        """Mark checkpoint as skipped (e.g., not part of validation schedule)."""
+        entry = self.validated_checkpoints.get(checkpoint_dir.name, {})
+        entry.update({
+            "status": "skipped",
+            "timestamp": datetime.now().isoformat(),
+            "reason": reason,
         })
         self.validated_checkpoints[checkpoint_dir.name] = entry
         self._save_manifest()
@@ -249,6 +294,18 @@ class StepImageMonitor:
             "success": success,
             "metrics": metrics if success else None,
             "num_images": num_images,
+        })
+        self.validated_checkpoints[checkpoint_key] = entry
+        self._save_manifest()
+
+    def mark_skipped(self, step: int, reason: str):
+        """Mark checkpoint (step directory) as skipped."""
+        checkpoint_key = f"checkpoint-{step}"
+        entry = self.validated_checkpoints.get(checkpoint_key, {})
+        entry.update({
+            "status": "skipped",
+            "timestamp": datetime.now().isoformat(),
+            "reason": reason,
         })
         self.validated_checkpoints[checkpoint_key] = entry
         self._save_manifest()
@@ -1925,6 +1982,51 @@ def main():
     logger.info(f"Check interval: {args.check_interval}s")
     logger.info("="*60)
 
+    # Prepare validation schedule helper
+    validation_interval = config.get("validation_steps", None)
+    if validation_interval is not None:
+        try:
+            validation_interval = int(validation_interval)
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid validation_steps value '{validation_interval}', disabling interval-based schedule")
+            validation_interval = None
+
+    schedule_offsets = config.get("validation_schedule_offsets")
+    schedule_min_step = config.get("validation_schedule_min_step", None)
+    if schedule_min_step is not None:
+        try:
+            schedule_min_step = int(schedule_min_step)
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid validation_schedule_min_step '{schedule_min_step}', ignoring minimum step constraint")
+            schedule_min_step = None
+
+    # Normalize offsets to a list of ints if provided
+    if schedule_offsets is None:
+        normalized_offsets = []
+    elif isinstance(schedule_offsets, list):
+        normalized_offsets = []
+        for offset in schedule_offsets:
+            try:
+                normalized_offsets.append(int(offset))
+            except (TypeError, ValueError):
+                logger.warning(f"Invalid validation schedule offset '{offset}' - skipping")
+    else:
+        try:
+            normalized_offsets = [int(schedule_offsets)]
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid validation schedule offset '{schedule_offsets}' - ignoring custom schedule")
+            normalized_offsets = []
+
+    if normalized_offsets:
+        logger.info(f"Custom validation schedule enabled with base_step={validation_interval}, offsets={normalized_offsets}, min_step={schedule_min_step}")
+    elif validation_interval:
+        logger.info(f"Validation will run every {validation_interval} steps (no custom offsets)")
+    else:
+        logger.info("Validation interval not specified; all checkpoints will be validated")
+
+    def should_validate(step: int) -> bool:
+        return is_step_in_validation_schedule(step, validation_interval, normalized_offsets, schedule_min_step)
+
     # Main monitoring loop
     try:
         # If loading from directory, monitor step directories instead of checkpoints
@@ -1958,6 +2060,12 @@ def main():
                     
                     for step, step_dir in new_steps:
                         try:
+                            if not should_validate(step):
+                                logger.info(f"Skipping step directory {step_dir.name} (step {step}) - not in validation schedule")
+                                if accelerator.is_main_process:
+                                    monitor.mark_skipped(step, "not_in_schedule")
+                                continue
+
                             logger.info(f"\n{'='*60}")
                             logger.info(f"Validating step directory: {step_dir.name} (step {step})")
                             logger.info(f"{'='*60}")
@@ -2066,6 +2174,12 @@ def main():
                     try:
                         # Extract step number
                         step = int(checkpoint_dir.name.split("-")[1])
+
+                        if not should_validate(step):
+                            logger.info(f"Skipping checkpoint {checkpoint_dir.name} (step {step}) - not in validation schedule")
+                            if accelerator.is_main_process:
+                                monitor.mark_skipped(checkpoint_dir, "not_in_schedule")
+                            continue
 
                         logger.info(f"\n{'='*60}")
                         logger.info(f"Validating checkpoint: {checkpoint_dir.name} (step {step})")

@@ -128,7 +128,7 @@ class SquarePad:
 
 #####################################################
 class RGFineTuningWebDataset(IterableDataset):
-    def __init__(self, url_list, tokenizer, data_filter_file=None, use_hcn=False, include_text=False):
+    def __init__(self, url_list, tokenizer, data_filter_file=None, use_hcn=False, use_fairdiffusion=False, use_demographic_encoder=False, include_text=False):
         # self.webdataset = wds.WebDataset(url_list).shuffle(1024)
         self.url_list = url_list
         self.webdataset = wds.DataPipeline(
@@ -159,10 +159,17 @@ class RGFineTuningWebDataset(IterableDataset):
 
         self.tokenizer = tokenizer
         self.use_hcn = use_hcn
+        self.use_fairdiffusion = use_fairdiffusion
+        self.use_demographic_encoder = use_demographic_encoder
         self.include_text = include_text  # Only include text field for validation (not training)
 
+        # Parse demographics if HCN, FairDiffusion, or DemographicEncoder is enabled
         if use_hcn:
             print("HCN mode enabled: parsing demographics from prompts")
+        elif use_fairdiffusion:
+            print("FairDiffusion mode enabled: parsing demographics from prompts")
+        elif use_demographic_encoder:
+            print("DemographicEncoder mode enabled: parsing demographics from prompts")
 
     def __len__(self):
         if self.data_filter is not None:
@@ -215,7 +222,8 @@ class RGFineTuningWebDataset(IterableDataset):
             except Exception as e:
                 print(f"Warning: Could not parse validation_metadata: {e}")
 
-        if self.use_hcn:
+        # Extract demographics if HCN, FairDiffusion, or DemographicEncoder is enabled
+        if self.use_hcn or self.use_fairdiffusion or self.use_demographic_encoder:
             # Extract demographics as categorical indices
             # Use metadata if available, otherwise parse from prompt
             if "age_idx" not in sample:
@@ -276,12 +284,15 @@ class RGFineTuningImageDirectoryDataset(Dataset):
                                           to include. Each line should be an image stem (e.g., 'image001').
                                           Defaults to None, meaning no filter is applied.
         use_hcn (bool): Whether to use HCN mode (parse demographics)
+        use_fairdiffusion (bool): Whether to use FairDiffusion mode (parse demographics)
     """
-    def __init__(self, image_dir_path, text_dir_path, tokenizer, data_filter_file=None, use_hcn=False, include_text=False):
+    def __init__(self, image_dir_path, text_dir_path, tokenizer, data_filter_file=None, use_hcn=False, use_fairdiffusion=False, use_demographic_encoder=False, include_text=False):
         self.image_dir_path = image_dir_path
         self.text_dir_path = text_dir_path
         self.tokenizer = tokenizer
         self.use_hcn = use_hcn
+        self.use_fairdiffusion = use_fairdiffusion
+        self.use_demographic_encoder = use_demographic_encoder
         self.include_text = include_text  # Only include text field for validation (not training)
 
         # Initialize image transformations
@@ -361,7 +372,8 @@ class RGFineTuningImageDirectoryDataset(Dataset):
         with open(text_path, "r", encoding="utf-8") as f:
             prompt = f.read().strip()
 
-        if self.use_hcn:
+        # Extract demographics if HCN, FairDiffusion, or DemographicEncoder is enabled
+        if self.use_hcn or self.use_fairdiffusion or self.use_demographic_encoder:
             # Extract demographics as categorical indices
             sample["age_idx"] = torch.tensor(parse_age_bin(prompt), dtype=torch.long)
             sample["sex_idx"] = torch.tensor(parse_sex(prompt), dtype=torch.long)
