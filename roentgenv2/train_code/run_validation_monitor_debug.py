@@ -62,40 +62,6 @@ class ValidationConfig:
     validation_num_inference_steps: Optional[int] = None
 
 
-def is_step_in_validation_schedule(
-    step: int,
-    base_step: Optional[int],
-    offsets: Optional[List[int]] = None,
-    min_step: Optional[int] = None,
-) -> bool:
-    """Return True if a checkpoint step should be validated under the custom schedule."""
-    if step <= 0:
-        return False
-
-    if min_step is not None and step < min_step:
-        return False
-
-    if base_step is None or base_step <= 0:
-        return True
-
-    if not offsets:
-        return step % base_step == 0
-
-    for offset in offsets:
-        try:
-            offset_int = int(offset)
-        except (TypeError, ValueError):
-            continue
-
-        candidate = step - offset_int
-        if candidate <= 0:
-            continue
-        if candidate % base_step == 0:
-            return True
-
-    return False
-
-
 def load_config(file_path):
     """Load YAML config file."""
     with open(file_path, "r") as stream:
@@ -184,17 +150,6 @@ class CheckpointMonitor:
             "success": success,
             "metrics": metrics if success else None,
             "num_images": num_images,
-        })
-        self.validated_checkpoints[checkpoint_dir.name] = entry
-        self._save_manifest()
-
-    def mark_skipped(self, checkpoint_dir: Path, reason: str):
-        """Mark checkpoint as skipped (e.g., not part of validation schedule)."""
-        entry = self.validated_checkpoints.get(checkpoint_dir.name, {})
-        entry.update({
-            "status": "skipped",
-            "timestamp": datetime.now().isoformat(),
-            "reason": reason,
         })
         self.validated_checkpoints[checkpoint_dir.name] = entry
         self._save_manifest()
@@ -294,18 +249,6 @@ class StepImageMonitor:
             "success": success,
             "metrics": metrics if success else None,
             "num_images": num_images,
-        })
-        self.validated_checkpoints[checkpoint_key] = entry
-        self._save_manifest()
-
-    def mark_skipped(self, step: int, reason: str):
-        """Mark checkpoint (step directory) as skipped."""
-        checkpoint_key = f"checkpoint-{step}"
-        entry = self.validated_checkpoints.get(checkpoint_key, {})
-        entry.update({
-            "status": "skipped",
-            "timestamp": datetime.now().isoformat(),
-            "reason": reason,
         })
         self.validated_checkpoints[checkpoint_key] = entry
         self._save_manifest()
@@ -462,7 +405,6 @@ class ValidationRunner:
                 url_list=val_urls,
                 tokenizer=self.tokenizer,
                 use_hcn=self.args.get("use_hcn", False),
-                use_demographic_encoder=self.args.get("use_demographic_encoder", False),
                 include_text=True,
             )
         else:
@@ -472,7 +414,6 @@ class ValidationRunner:
                 text_dir_path=self.args["validation_csv"],
                 tokenizer=self.tokenizer,
                 use_hcn=self.args.get("use_hcn", False),
-                use_demographic_encoder=self.args.get("use_demographic_encoder", False),
                 include_text=True,
             )
 
@@ -536,29 +477,6 @@ class ValidationRunner:
                     f"DDP requires HCN to be initialized consistently on all ranks. Error: {e}"
                 )
         
-        # Initialize DemographicEncoder (V4) if enabled
-        self.demographic_encoder = None
-        
-        if self.args.get("use_demographic_encoder", False):
-            try:
-                from demographic_encoder import DemographicEncoder
-                self.demographic_encoder = DemographicEncoder(
-                    num_age_bins=self.args.get("demo_num_age_bins", 5),
-                    num_sex=self.args.get("demo_num_sex", 2),
-                    num_race=self.args.get("demo_num_race", 4),
-                    d_hidden=self.args.get("demo_d_hidden", 256),
-                    d_output=self.args.get("demo_d_output", 1024),
-                    dropout=self.args.get("demo_dropout", 0.1),
-                )
-                if self.accelerator.is_local_main_process:
-                    logger.info(f"✓ DemographicEncoder (V4) architecture initialized on all ranks")
-            except Exception as e:
-                logger.error(f"Rank {self.accelerator.process_index}: Failed to initialize DemographicEncoder: {e}")
-                raise RuntimeError(
-                    f"DemographicEncoder initialization failed on rank {self.accelerator.process_index}. "
-                    f"DDP requires DemographicEncoder to be initialized consistently on all ranks. Error: {e}"
-                )
-        
         # For validation, we DON'T wrap models in DDP (no gradient sync needed)
         # We'll just move them to the correct device and load checkpoint states manually
         # This avoids the prepare() hang issue in distributed validation
@@ -569,8 +487,6 @@ class ValidationRunner:
         self.unet = self.unet.to(self.accelerator.device)
         if self.hcn is not None:
             self.hcn = self.hcn.to(self.accelerator.device)
-        if self.demographic_encoder is not None:
-            self.demographic_encoder = self.demographic_encoder.to(self.accelerator.device)
         if self.args.get("train_text_encoder", False):
             self.text_encoder = self.text_encoder.to(self.accelerator.device)
         
@@ -580,9 +496,6 @@ class ValidationRunner:
         if self.hcn is not None:
             self.hcn.eval()
             self.hcn.requires_grad_(False)
-        if self.demographic_encoder is not None:
-            self.demographic_encoder.eval()
-            self.demographic_encoder.requires_grad_(False)
         if self.args.get("train_text_encoder", False):
             self.text_encoder.eval()
             self.text_encoder.requires_grad_(False)
@@ -643,40 +556,6 @@ class ValidationRunner:
                     logger.info("Loading HCN from pytorch_model_2.bin...")
                     state_dict = torch.load(checkpoint_path / "pytorch_model_2.bin", map_location=self.accelerator.device)
                     self.hcn.load_state_dict(state_dict, strict=False)
-            
-            # Load DemographicEncoder (V4) if enabled
-            if self.demographic_encoder is not None:
-                # Try loading from demographic_encoder subdirectory first (saved by pipeline.py)
-                demo_encoder_path = checkpoint_path / "demographic_encoder"
-                if demo_encoder_path.exists():
-                    logger.info(f"Loading DemographicEncoder from {demo_encoder_path}...")
-                    try:
-                        from demographic_encoder import DemographicEncoder
-                        self.demographic_encoder = DemographicEncoder.from_pretrained(str(demo_encoder_path))
-                        self.demographic_encoder = self.demographic_encoder.to(self.accelerator.device)
-                        self.demographic_encoder.eval()
-                        self.demographic_encoder.requires_grad_(False)
-                        logger.info("✓ DemographicEncoder loaded from checkpoint")
-                    except Exception as e:
-                        logger.warning(f"Failed to load DemographicEncoder from {demo_encoder_path}: {e}")
-                        logger.info("Trying to load from model_2 or model_3...")
-                        # Fallback: try model_2 or model_3 (depending on whether HCN is also present)
-                        if self.hcn is None:
-                            # No HCN, so DemographicEncoder should be in model_2
-                            if (checkpoint_path / "model_2.safetensors").exists():
-                                state_dict = safetensors.torch.load_file(checkpoint_path / "model_2.safetensors")
-                                self.demographic_encoder.load_state_dict(state_dict, strict=False)
-                            elif (checkpoint_path / "pytorch_model_2.bin").exists():
-                                state_dict = torch.load(checkpoint_path / "pytorch_model_2.bin", map_location=self.accelerator.device)
-                                self.demographic_encoder.load_state_dict(state_dict, strict=False)
-                        else:
-                            # HCN is in model_2, so DemographicEncoder should be in model_3
-                            if (checkpoint_path / "model_3.safetensors").exists():
-                                state_dict = safetensors.torch.load_file(checkpoint_path / "model_3.safetensors")
-                                self.demographic_encoder.load_state_dict(state_dict, strict=False)
-                            elif (checkpoint_path / "pytorch_model_3.bin").exists():
-                                state_dict = torch.load(checkpoint_path / "pytorch_model_3.bin", map_location=self.accelerator.device)
-                                self.demographic_encoder.load_state_dict(state_dict, strict=False)
             
             logger.info("✓ Checkpoint state loaded")
         except FileNotFoundError as e:
@@ -854,18 +733,6 @@ class ValidationRunner:
 
         local_batch_size = len(prompts)
 
-        # Apply demographic dropout if enabled (strip demographics from text)
-        # Validation always applies dropout if enabled (deterministic), matching training when dropout_prob=1.0
-        demo_use_dropout = self.args.get("demo_use_dropout", False)
-        if demo_use_dropout:
-            from dataset_wds import extract_clinical_text
-            # Strip demographics from prompts (same as training)
-            # Note: Validation always applies if enabled (no probability check) to be deterministic
-            # This matches training behavior when demo_text_dropout_prob=1.0
-            prompts = [extract_clinical_text(prompt) for prompt in prompts]
-            if self.accelerator.is_local_main_process and batch_start_idx == 0:
-                self.logger.info(f"✓ Applied demographic dropout: stripped demographics from validation prompts")
-
         # Tokenize prompts
         text_inputs = self.tokenizer(
             prompts,
@@ -883,10 +750,6 @@ class ValidationRunner:
         # Add HCN conditioning if available
         if self.hcn is not None:
             text_embeddings = self._add_hcn_conditioning(text_embeddings, batch_data_list)
-        
-        # Add DemographicEncoder (V4) conditioning if available
-        if self.demographic_encoder is not None:
-            text_embeddings = self._add_demographic_encoder_conditioning(text_embeddings, batch_data_list)
 
         # Create unconditional embeddings
         uncond_inputs = self.tokenizer(
@@ -901,17 +764,9 @@ class ValidationRunner:
         uncond_embeddings = uncond_embeds[0]
 
         # Ensure unconditional embeddings match the sequence length of conditional ones.
-        # We intentionally DO NOT add demographic conditioning here; instead we append zero
-        # demographic tokens so classifier-free guidance still works mathematically.
+        # We intentionally DO NOT add HCN conditioning here; instead we append a zero
+        # demographic token so classifier-free guidance still works mathematically.
         if self.hcn is not None:
-            zero_ctx = torch.zeros(
-                (uncond_embeddings.shape[0], 1, uncond_embeddings.shape[-1]),
-                device=uncond_embeddings.device,
-                dtype=uncond_embeddings.dtype,
-            )
-            uncond_embeddings = torch.cat([uncond_embeddings, zero_ctx], dim=1)
-        
-        if self.demographic_encoder is not None:
             zero_ctx = torch.zeros(
                 (uncond_embeddings.shape[0], 1, uncond_embeddings.shape[-1]),
                 device=uncond_embeddings.device,
@@ -1038,48 +893,9 @@ class ValidationRunner:
 
             hcn_unwrapped = self.accelerator.unwrap_model(self.hcn)
             hcn_unwrapped.eval()
-            hcn_ctx, _, _, _ = hcn_unwrapped(age_indices, sex_indices, race_indices)
+            hcn_ctx, _, _ = hcn_unwrapped(age_indices, sex_indices, race_indices)
 
             text_embeddings = torch.cat([text_embeddings, hcn_ctx], dim=1)
-
-        return text_embeddings
-    
-    def _add_demographic_encoder_conditioning(self, text_embeddings, batch_data_list):
-        """Add DemographicEncoder (V4) conditioning to text embeddings."""
-        if self.demographic_encoder is None:
-            return text_embeddings
-
-        age_indices = []
-        sex_indices = []
-        race_indices = []
-
-        for (batch_data, batch_idx) in batch_data_list:
-            if "age_idx" in batch_data and "sex_idx" in batch_data and "race_idx" in batch_data:
-                age_idx = batch_data["age_idx"][batch_idx] if batch_data["age_idx"].dim() > 0 else batch_data["age_idx"]
-                sex_idx = batch_data["sex_idx"][batch_idx] if batch_data["sex_idx"].dim() > 0 else batch_data["sex_idx"]
-                race_idx = batch_data["race_idx"][batch_idx] if batch_data["race_idx"].dim() > 0 else batch_data["race_idx"]
-
-                age_indices.append(age_idx)
-                sex_indices.append(sex_idx)
-                race_indices.append(race_idx)
-
-        if age_indices:
-            age_indices = torch.stack(age_indices).squeeze().to(self.accelerator.device)
-            sex_indices = torch.stack(sex_indices).squeeze().to(self.accelerator.device)
-            race_indices = torch.stack(race_indices).squeeze().to(self.accelerator.device)
-
-            if age_indices.dim() == 0:
-                age_indices = age_indices.unsqueeze(0)
-            if sex_indices.dim() == 0:
-                sex_indices = sex_indices.unsqueeze(0)
-            if race_indices.dim() == 0:
-                race_indices = race_indices.unsqueeze(0)
-
-            demo_encoder_unwrapped = self.accelerator.unwrap_model(self.demographic_encoder) if hasattr(self.accelerator, 'unwrap_model') else self.demographic_encoder
-            demo_encoder_unwrapped.eval()
-            demo_ctx, _ = demo_encoder_unwrapped(age_indices, sex_indices, race_indices)
-
-            text_embeddings = torch.cat([text_embeddings, demo_ctx], dim=1)
 
         return text_embeddings
 
@@ -2255,50 +2071,6 @@ def main():
     logger.info(f"Check interval: {args.check_interval}s")
     logger.info("="*60)
 
-    # Prepare validation schedule helper
-    validation_interval = config.get("validation_steps", None)
-    if validation_interval is not None:
-        try:
-            validation_interval = int(validation_interval)
-        except (TypeError, ValueError):
-            logger.warning(f"Invalid validation_steps value '{validation_interval}', disabling interval-based schedule")
-            validation_interval = None
-
-    schedule_offsets = config.get("validation_schedule_offsets")
-    schedule_min_step = config.get("validation_schedule_min_step", None)
-    if schedule_min_step is not None:
-        try:
-            schedule_min_step = int(schedule_min_step)
-        except (TypeError, ValueError):
-            logger.warning(f"Invalid validation_schedule_min_step '{schedule_min_step}', ignoring minimum step constraint")
-            schedule_min_step = None
-
-    if schedule_offsets is None:
-        normalized_offsets = []
-    elif isinstance(schedule_offsets, list):
-        normalized_offsets = []
-        for offset in schedule_offsets:
-            try:
-                normalized_offsets.append(int(offset))
-            except (TypeError, ValueError):
-                logger.warning(f"Invalid validation schedule offset '{offset}' - skipping")
-    else:
-        try:
-            normalized_offsets = [int(schedule_offsets)]
-        except (TypeError, ValueError):
-            logger.warning(f"Invalid validation schedule offset '{schedule_offsets}' - ignoring custom schedule")
-            normalized_offsets = []
-
-    if normalized_offsets:
-        logger.info(f"Custom validation schedule enabled with base_step={validation_interval}, offsets={normalized_offsets}, min_step={schedule_min_step}")
-    elif validation_interval:
-        logger.info(f"Validation will run every {validation_interval} steps (no custom offsets)")
-    else:
-        logger.info("Validation interval not specified; all checkpoints will be validated")
-
-    def should_validate(step: int) -> bool:
-        return is_step_in_validation_schedule(step, validation_interval, normalized_offsets, schedule_min_step)
-
     # Main monitoring loop
     try:
         # If loading from directory, monitor step directories instead of checkpoints
@@ -2347,12 +2119,6 @@ def main():
                             continue
 
                         try:
-                            if not should_validate(step):
-                                logger.info(f"Skipping step directory {step_dir.name} (step {step}) - not in validation schedule")
-                                if accelerator.is_main_process:
-                                    monitor.mark_skipped(step, "not_in_schedule")
-                                continue
-
                             logger.info(f"\n{'='*60}")
                             logger.info(f"Validating step directory: {step_dir.name} (step {step})")
                             logger.info(f"{'='*60}")
@@ -2492,10 +2258,6 @@ def main():
                     sorted_checkpoints = sorted(new_checkpoints, key=_step_from_dir)
                     for ckpt in sorted_checkpoints:
                         step_val = _step_from_dir(ckpt)
-                        if not should_validate(step_val):
-                            logger.info(f"Skipping checkpoint {ckpt.name} (step {step_val}) - not in validation schedule")
-                            monitor.mark_skipped(ckpt, "not_in_schedule")
-                            continue
                         if step_val > last_processed_step:
                             next_checkpoint_dir = ckpt
                             next_step = step_val

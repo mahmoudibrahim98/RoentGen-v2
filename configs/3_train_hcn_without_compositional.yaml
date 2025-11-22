@@ -59,7 +59,6 @@ hcn_num_race: 4
 hcn_kl_weight: 0.001
 hcn_kl_anneal_steps: 10000
 hcn_comp_weight: 0
-hcn_aux_weight: 0.1
 
 # ==============================================================================
 # VALIDATION CONFIGURATION

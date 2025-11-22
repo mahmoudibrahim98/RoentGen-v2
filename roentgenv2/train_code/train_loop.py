@@ -30,8 +30,6 @@ def train_loop(
     lr_scheduler,
     ema_unet,
     hcn=None,  # Hierarchical Conditioner Network for compositional demographics
-    demographic_encoder=None,  # V4: Lightweight demographic encoder
-    fair_controller=None,
 ):
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
@@ -51,10 +49,6 @@ def train_loop(
         # Set HCN to training mode
         if hcn is not None:
             hcn.train()
-        
-        # Set DemographicEncoder to training mode
-        if demographic_encoder is not None:
-            demographic_encoder.train()
 
         for step, batch in enumerate(train_dataloader):
             logger.info("*** batch {} ***".format(batch["pixel_values"].shape))
@@ -78,14 +72,6 @@ def train_loop(
                     raise Exception("not supported")
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
-                noise_for_latents = noise
-                if (
-                    args.use_fairdiffusion
-                    and args.fairdiffusion_input_perturbation > 0
-                ):
-                    noise_for_latents = noise + args.fairdiffusion_input_perturbation * torch.randn_like(
-                        noise
-                    )
                 bsz = latents.shape[0]
                 # Sample a random timestep for each image
                 timesteps = torch.randint(
@@ -98,9 +84,7 @@ def train_loop(
 
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_latents = noise_scheduler.add_noise(
-                    latents, noise_for_latents, timesteps
-                )
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # Get the text embedding for conditioning
                 text_input_ids = batch["input_ids"]
@@ -108,45 +92,6 @@ def train_loop(
                     attention_mask = batch["attention_mask"]
                 else:
                     attention_mask = None
-
-                # === Optional: Demographic Dropout (works with HCN or DemographicEncoder) ===
-                # Remove demographics from text to force model to use demographic encoder/HCN
-                use_demographic_dropout = (
-                    getattr(args, 'demo_use_dropout', False) and 
-                    global_step >= getattr(args, 'demo_dropout_start_step', 0) and
-                    torch.rand(1).item() < getattr(args, 'demo_text_dropout_prob', 0.0)
-                )
-                
-                if use_demographic_dropout:
-                    # Re-tokenize prompts WITHOUT demographics
-                    from dataset_wds import extract_clinical_text
-                    
-                    # Get the text from batch if available, otherwise decode from input_ids
-                    if "text" in batch:
-                        clean_prompts = [extract_clinical_text(text) for text in batch["text"]]
-                    else:
-                        # Decode input_ids back to text, then strip demographics
-                        tokenizer = text_encoder.tokenizer if hasattr(text_encoder, 'tokenizer') else None
-                        if tokenizer:
-                            prompts = tokenizer.batch_decode(text_input_ids, skip_special_tokens=True)
-                            clean_prompts = [extract_clinical_text(text) for text in prompts]
-                        else:
-                            clean_prompts = None
-                    
-                    if clean_prompts:
-                        # Re-tokenize clean prompts
-                        tokenizer = text_encoder.tokenizer if hasattr(text_encoder, 'tokenizer') else None
-                        if tokenizer:
-                            clean_tokenized = tokenizer(
-                                clean_prompts,
-                                padding="max_length",
-                                truncation=True,
-                                max_length=tokenizer.model_max_length,
-                                return_tensors="pt",
-                            )
-                            text_input_ids = clean_tokenized.input_ids.to(text_input_ids.device)
-                            if args.use_attention_mask:
-                                attention_mask = clean_tokenized.attention_mask.to(text_input_ids.device)
 
                 prompt_embeds = text_encoder(
                     input_ids=text_input_ids,
@@ -158,11 +103,9 @@ def train_loop(
                 # === HCN: Hierarchical Conditioning ===
                 kl_loss = None
                 comp_loss = None
-                aux_loss = None
-                hcn_ctx_norm = None
                 if hcn is not None:
                     # Get HCN demographic context
-                    hcn_ctx, mu, logsigma, aux_logits = hcn(
+                    hcn_ctx, mu, logsigma = hcn(
                         batch["age_idx"],
                         batch["sex_idx"],
                         batch["race_idx"],
@@ -172,8 +115,6 @@ def train_loop(
                     encoder_hidden_states = torch.cat(
                         [encoder_hidden_states, hcn_ctx], dim=1
                     )  # [B, 78, d_ctx] = 77 text tokens + 1 demographic token
-
-                    hcn_ctx_norm = hcn_ctx.norm(dim=-1).mean()
 
                     # Compute KL divergence loss (uncertainty regularization)
                     # KL(N(mu, sigma) || N(0, 1))
@@ -190,43 +131,6 @@ def train_loop(
                         batch["sex_idx"],
                         batch["race_idx"],
                     )
-
-                    # Auxiliary demographic classification losses
-                    # Always compute aux_loss to ensure gradients flow through auxiliary heads
-                    # (even if weight is 0, we need gradients for DDP)
-                    if aux_logits is not None:
-                        age_ce = F.cross_entropy(aux_logits["age"], batch["age_idx"])
-                        sex_ce = F.cross_entropy(aux_logits["sex"], batch["sex_idx"])
-                        race_ce = F.cross_entropy(aux_logits["race"], batch["race_idx"])
-                        aux_loss = (age_ce + sex_ce + race_ce) / 3.0
-                    else:
-                        aux_loss = None
-
-                # === V4: Demographic Encoder Conditioning ===
-                demo_aux_loss = None
-                demo_ctx_norm = None
-                if demographic_encoder is not None:
-                    # Get demographic encoder output
-                    demo_ctx, demo_aux_logits = demographic_encoder(
-                        batch["age_idx"],
-                        batch["sex_idx"],
-                        batch["race_idx"],
-                    )  # demo_ctx: [B, 1, d_ctx]
-                    
-                    # Concatenate text and demographic contexts
-                    # Note: If HCN was also used, this would be [B, 78+1, d_ctx]
-                    # But typically only one of HCN or DemographicEncoder is active
-                    encoder_hidden_states = torch.cat(
-                        [encoder_hidden_states, demo_ctx], dim=1
-                    )  # [B, 78, d_ctx] = 77 text tokens + 1 demographic token
-                    
-                    demo_ctx_norm = demo_ctx.norm(dim=-1).mean()
-                    
-                    # Compute auxiliary demographic classification losses (strong supervision)
-                    age_ce = F.cross_entropy(demo_aux_logits["age"], batch["age_idx"])
-                    sex_ce = F.cross_entropy(demo_aux_logits["sex"], batch["sex_idx"])
-                    race_ce = F.cross_entropy(demo_aux_logits["race"], batch["race_idx"])
-                    demo_aux_loss = (age_ce + sex_ce + race_ce) / 3.0
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -247,40 +151,11 @@ def train_loop(
                 ).sample
 
                 # Compute instance loss
-                per_sample_loss = F.mse_loss(
+                loss = F.mse_loss(
                     noise_pred.float(), target.float(), reduction="none"
                 ).mean([1, 2, 3])
-                per_sample_loss = per_sample_loss.to(weight_dtype)
-                base_loss_weights = batch["loss_weights"].to(dtype=weight_dtype)
-
-                fairness_logs = {}
-                fairness_weights = torch.ones_like(per_sample_loss)
-                if fair_controller is not None:
-                    attribute_tensors = []
-                    for field in fair_controller.attribute_fields:
-                        if field not in batch:
-                            raise KeyError(
-                                f"Batch is missing required FairDiffusion field '{field}'."
-                            )
-                        attribute_tensors.append(
-                            batch[field].to(accelerator.device, dtype=torch.long)
-                        )
-                    attributes = torch.stack(attribute_tensors, dim=1)
-                    fairness_result = fair_controller.apply(
-                        per_sample_loss.detach(),
-                        attributes.detach(),
-                        global_step,
-                    )
-                    fairness_weights = fairness_result.instance_weights.to(
-                        device=per_sample_loss.device, dtype=weight_dtype
-                    )
-                    fairness_logs = fairness_result.logs
-
-                combined_weights = base_loss_weights * fairness_weights
-                combined_weights = combined_weights / (
-                    combined_weights.sum() + 1e-12
-                )
-                loss = (per_sample_loss * combined_weights).sum()
+                loss_weights = batch["loss_weights"].to(dtype=weight_dtype)
+                loss = (loss * loss_weights).sum() / loss_weights.sum()
 
                 # === Add HCN losses ===
                 if kl_loss is not None:
@@ -290,15 +165,6 @@ def train_loop(
 
                 if comp_loss is not None:
                     loss = loss + args.hcn_comp_weight * comp_loss
-
-                # Always add aux_loss to ensure gradients flow (even if weight is 0)
-                # This prevents DDP "unused parameters" error when aux_weight=0
-                if aux_loss is not None:
-                    loss = loss + args.hcn_aux_weight * aux_loss
-                
-                # === Add DemographicEncoder losses ===
-                if demo_aux_loss is not None and args.demo_aux_weight > 0:
-                    loss = loss + args.demo_aux_weight * demo_aux_loss
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -310,10 +176,6 @@ def train_loop(
                     # Add HCN parameters to gradient clipping
                     if hcn is not None:
                         params_to_clip = itertools.chain(params_to_clip, hcn.parameters())
-                    
-                    # Add DemographicEncoder parameters to gradient clipping
-                    if demographic_encoder is not None:
-                        params_to_clip = itertools.chain(params_to_clip, demographic_encoder.parameters())
 
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
@@ -380,24 +242,12 @@ def train_loop(
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
 
-            if fairness_logs:
-                logs.update(fairness_logs)
             # Add HCN losses to logging
             if kl_loss is not None:
                 logs["kl_loss"] = kl_loss.detach().item()
                 logs["kl_weight"] = kl_weight
             if comp_loss is not None:
                 logs["comp_loss"] = comp_loss.detach().item()
-            if aux_loss is not None:
-                logs["aux_loss"] = aux_loss.detach().item()
-            if hcn_ctx_norm is not None:
-                logs["hcn_ctx_norm"] = hcn_ctx_norm.detach().item()
-            
-            # Add DemographicEncoder losses to logging
-            if demo_aux_loss is not None:
-                logs["demo_aux_loss"] = demo_aux_loss.detach().item()
-            if demo_ctx_norm is not None:
-                logs["demo_ctx_norm"] = demo_ctx_norm.detach().item()
 
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
