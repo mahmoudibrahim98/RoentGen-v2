@@ -258,8 +258,6 @@ def main(args):
             tokenizer=tokenizer,
             data_filter_file=args.data_filter_file,
             use_hcn=args.use_hcn,
-            use_fairdiffusion=args.use_fairdiffusion,
-            use_demographic_encoder=args.use_demographic_encoder,
         )
 
         train_dataloader = torch.utils.data.DataLoader(
@@ -276,8 +274,6 @@ def main(args):
             tokenizer=tokenizer,
             data_filter_file=args.data_filter_file,
             use_hcn=args.use_hcn,
-            use_fairdiffusion=args.use_fairdiffusion,
-            use_demographic_encoder=args.use_demographic_encoder,
         )
 
         with accelerator.main_process_first():
@@ -500,9 +496,7 @@ def main(args):
         optimizer,
         lr_scheduler,
         ema_unet,
-        hcn,  # Add HCN parameter
-        demographic_encoder,  # Add DemographicEncoder parameter (V4)
-        fair_controller=fair_controller,
+        hcn=hcn,  # Add HCN parameter
     )
 
     if fair_controller is not None:
