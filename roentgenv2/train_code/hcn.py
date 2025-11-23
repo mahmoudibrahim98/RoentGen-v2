@@ -19,7 +19,7 @@ Authors: [Your names]
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Union
 
 
 class MLP(nn.Module):
@@ -86,6 +86,7 @@ class HierarchicalConditioner(nn.Module):
         d_ctx: int = 1024,
         dropout: float = 0.1,
         use_uncertainty: bool = True,
+        use_aux_loss: bool = False,
     ):
         super().__init__()
 
@@ -98,6 +99,7 @@ class HierarchicalConditioner(nn.Module):
             'd_ctx': d_ctx,
             'dropout': dropout,
             'use_uncertainty': use_uncertainty,
+            'use_aux_loss': use_aux_loss,
         }
 
         self.num_age = num_age_bins
@@ -106,6 +108,7 @@ class HierarchicalConditioner(nn.Module):
         self.d_node = d_node
         self.d_ctx = d_ctx
         self.use_uncertainty = use_uncertainty
+        self.use_aux_loss = use_aux_loss
 
         # === Grandparent embeddings (single attributes) ===
         self.emb_age = nn.Embedding(num_age_bins, d_node)
@@ -153,18 +156,24 @@ class HierarchicalConditioner(nn.Module):
         )
 
         # === Auxiliary demographic classifiers (for diagnostic losses) ===
-        self.age_classifier = nn.Sequential(
+        # Only include if use_aux_loss is True (matches v1 behavior when aux_weight=0)
+        if use_aux_loss:
+            self.age_classifier = nn.Sequential(
             nn.LayerNorm(d_node),
             nn.Linear(d_node, num_age_bins),
         )
-        self.sex_classifier = nn.Sequential(
+            self.sex_classifier = nn.Sequential(
             nn.LayerNorm(d_node),
             nn.Linear(d_node, num_sex),
         )
-        self.race_classifier = nn.Sequential(
+            self.race_classifier = nn.Sequential(
             nn.LayerNorm(d_node),
             nn.Linear(d_node, num_race),
         )
+        else:
+            self.age_classifier = None
+            self.sex_classifier = None
+            self.race_classifier = None
 
         self._init_weights()
 
@@ -185,7 +194,7 @@ class HierarchicalConditioner(nn.Module):
         age_idx: torch.Tensor,
         sex_idx: torch.Tensor,
         race_idx: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """
         Forward pass through hierarchical conditioning network.
 
@@ -238,11 +247,15 @@ class HierarchicalConditioner(nn.Module):
         ctx = self.proj_ctx(z).unsqueeze(1)  # [B, 1, d_ctx]
 
         # === Auxiliary logits (use mu which is deterministic at inference) ===
-        aux_logits = {
-            "age": self.age_classifier(mu),
-            "sex": self.sex_classifier(mu),
-            "race": self.race_classifier(mu),
+        # Only compute if use_aux_loss is True (matches v1 behavior when aux_weight=0)
+        if self.use_aux_loss:
+            aux_logits = {
+                "age": self.age_classifier(mu),
+                "sex": self.sex_classifier(mu),
+                "race": self.race_classifier(mu),
         }
+        else:
+            aux_logits = None
 
         return ctx, mu, logsigma, aux_logits
 
@@ -355,28 +368,52 @@ def test_hcn():
     """Quick test of HCN module."""
     print("Testing HCN module...")
 
-    # Create HCN
-    hcn = HierarchicalConditioner(
+    # Test HCN with aux_loss enabled
+    print("  Testing HCN with aux_loss=True...")
+    hcn_with_aux = HierarchicalConditioner(
         num_age_bins=5,
         num_sex=2,
         num_race=4,
         d_node=256,
         d_ctx=1024,
+        use_aux_loss=True,
     )
 
-    # Test forward pass
     batch_size = 8
     age = torch.randint(0, 5, (batch_size,))
     sex = torch.randint(0, 2, (batch_size,))
     race = torch.randint(0, 4, (batch_size,))
 
-    hcn.train()
-    ctx, mu, logsigma, aux_logits = hcn(age, sex, race)
+    hcn_with_aux.train()
+    ctx, mu, logsigma, aux_logits = hcn_with_aux(age, sex, race)
 
     assert ctx.shape == (batch_size, 1, 1024), f"Expected (8, 1, 1024), got {ctx.shape}"
     assert mu.shape == (batch_size, 256), f"Expected (8, 256), got {mu.shape}"
     assert logsigma.shape == (batch_size, 256), f"Expected (8, 256), got {logsigma.shape}"
+    assert aux_logits is not None, "aux_logits should not be None when use_aux_loss=True"
     assert all(k in aux_logits for k in ("age", "sex", "race"))
+    
+    # Test HCN with aux_loss disabled (v1 behavior)
+    print("  Testing HCN with aux_loss=False...")
+    hcn_no_aux = HierarchicalConditioner(
+        num_age_bins=5,
+        num_sex=2,
+        num_race=4,
+        d_node=256,
+        d_ctx=1024,
+        use_aux_loss=False,
+    )
+
+    hcn_no_aux.train()
+    ctx, mu, logsigma, aux_logits = hcn_no_aux(age, sex, race)
+
+    assert ctx.shape == (batch_size, 1, 1024), f"Expected (8, 1, 1024), got {ctx.shape}"
+    assert mu.shape == (batch_size, 256), f"Expected (8, 256), got {mu.shape}"
+    assert logsigma.shape == (batch_size, 256), f"Expected (8, 256), got {logsigma.shape}"
+    assert aux_logits is None, "aux_logits should be None when use_aux_loss=False"
+    
+    # Use hcn_with_aux for remaining tests
+    hcn = hcn_with_aux
 
     print(f"✓ Forward pass: ctx shape = {ctx.shape}")
 
@@ -395,9 +432,10 @@ def test_hcn():
     import shutil
     temp_dir = tempfile.mkdtemp()
     try:
-        hcn.save_pretrained(temp_dir)
+        hcn_with_aux.save_pretrained(temp_dir)
         hcn_loaded = HierarchicalConditioner.from_pretrained(temp_dir)
-        ctx_loaded, _, _, _ = hcn_loaded(age, sex, race)
+        ctx_loaded, _, _, aux_logits_loaded = hcn_loaded(age, sex, race)
+        assert aux_logits_loaded is not None, "Loaded model should have aux_logits when use_aux_loss=True"
         print(f"✓ Save/load successful")
     finally:
         shutil.rmtree(temp_dir)

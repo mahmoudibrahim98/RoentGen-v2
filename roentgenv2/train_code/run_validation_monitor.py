@@ -516,6 +516,10 @@ class ValidationRunner:
             # All ranks must execute this code path (no is_main_process check)
             try:
                 from hcn import HierarchicalConditioner
+                # Determine if auxiliary loss should be enabled based on hcn_aux_weight
+                # This must match the training code logic in models.py:load_hcn()
+                hcn_aux_weight = self.args.get("hcn_aux_weight", 0.0)
+                use_aux_loss = hcn_aux_weight > 0.0
                 self.hcn = HierarchicalConditioner(
                     num_age_bins=self.args.get("hcn_num_age_bins", 5),
                     num_sex=self.args.get("hcn_num_sex", 2),
@@ -524,9 +528,10 @@ class ValidationRunner:
                     d_ctx=self.args.get("hcn_d_ctx", 1024),
                     dropout=self.args.get("hcn_dropout", 0.1),
                     use_uncertainty=self.args.get("hcn_use_uncertainty", True),
+                    use_aux_loss=use_aux_loss,
                 )
                 if self.accelerator.is_local_main_process:
-                    logger.info(f"✓ HCN architecture initialized on all ranks")
+                    logger.info(f"✓ HCN architecture initialized on all ranks (use_aux_loss={use_aux_loss}, hcn_aux_weight={hcn_aux_weight})")
             except Exception as e:
                 logger.error(f"Rank {self.accelerator.process_index}: Failed to initialize HCN: {e}")
                 raise RuntimeError(
@@ -789,6 +794,20 @@ class ValidationRunner:
             batch_data_list.append((prompt_data["batch"], prompt_data["batch_idx"]))
 
         local_batch_size = len(prompts)
+
+        # Strip demographics from prompts if HCN or DemographicEncoder is enabled
+        # This matches training behavior: when use_hcn=True, demographics are stripped
+        # at dataset level and only clinical text is tokenized
+        use_hcn = self.args.get("use_hcn", False)
+        use_demographic_encoder = self.args.get("use_demographic_encoder", False)
+        if use_hcn or use_demographic_encoder:
+            from dataset_wds import extract_clinical_text
+            prompts = [extract_clinical_text(prompt) for prompt in prompts]
+            if self.accelerator.is_local_main_process and batch_start_idx == 0:
+                self.logger.info(
+                    f"✓ Stripped demographics from validation prompts "
+                    f"(use_hcn={use_hcn}, use_demographic_encoder={use_demographic_encoder})"
+                )
 
         # Tokenize prompts
         text_inputs = self.tokenizer(

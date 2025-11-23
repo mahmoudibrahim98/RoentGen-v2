@@ -110,10 +110,13 @@ def main(args):
             os.makedirs(args.output_dir, exist_ok=True)
         else:
             raise Exception("Nowhere to store the weights! please specify output_dir")
-
-    # Save the configuration in the output directory
-    with open(os.path.join(args.output_dir, "config.yaml"), "w") as file:
-        yaml.dump(args.get_config(), file)
+        
+        # Save the configuration in the output directory
+        with open(os.path.join(args.output_dir, "config.yaml"), "w") as file:
+            yaml.dump(args.get_config(), file)
+    
+    # Wait for main process to create directory before proceeding
+    accelerator.wait_for_everyone()
 
     ##########################################################
     ### Get the models: text_encoder, vae, unet, tokenizer, HCN ###

@@ -351,6 +351,9 @@ def load_hcn(args, logger):
             "Could not import HCN module. Make sure hcn.py is in the same directory."
         )
 
+    # Determine if auxiliary loss should be enabled based on hcn_aux_weight
+    use_aux_loss = getattr(args, 'hcn_aux_weight', 0.0) > 0.0
+    
     hcn = HierarchicalConditioner(
         num_age_bins=args.hcn_num_age_bins,
         num_sex=args.hcn_num_sex,
@@ -359,6 +362,7 @@ def load_hcn(args, logger):
         d_ctx=args.hcn_d_ctx,
         dropout=args.hcn_dropout,
         use_uncertainty=args.hcn_use_uncertainty,
+        use_aux_loss=use_aux_loss,
     )
 
     num_params = sum(p.numel() for p in hcn.parameters())
@@ -369,5 +373,6 @@ def load_hcn(args, logger):
     logger.info(f"  - Node dimension: {args.hcn_d_node}")
     logger.info(f"  - Context dimension: {args.hcn_d_ctx}")
     logger.info(f"  - Uncertainty: {args.hcn_use_uncertainty}")
+    logger.info(f"  - Auxiliary loss: {use_aux_loss} (hcn_aux_weight={getattr(args, 'hcn_aux_weight', 0.0)})")
 
     return hcn

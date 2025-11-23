@@ -518,6 +518,10 @@ class ValidationRunner:
             # All ranks must execute this code path (no is_main_process check)
             try:
                 from hcn import HierarchicalConditioner
+                # Determine if auxiliary loss should be enabled based on hcn_aux_weight
+                # This must match the training code logic in models.py:load_hcn()
+                hcn_aux_weight = self.args.get("hcn_aux_weight", 0.0)
+                use_aux_loss = hcn_aux_weight > 0.0
                 self.hcn = HierarchicalConditioner(
                     num_age_bins=self.args.get("hcn_num_age_bins", 5),
                     num_sex=self.args.get("hcn_num_sex", 2),
@@ -526,6 +530,7 @@ class ValidationRunner:
                     d_ctx=self.args.get("hcn_d_ctx", 1024),
                     dropout=self.args.get("hcn_dropout", 0.1),
                     use_uncertainty=self.args.get("hcn_use_uncertainty", True),
+                    use_aux_loss=use_aux_loss,
                 )
                 if self.accelerator.is_local_main_process:
                     logger.info(f"✓ HCN architecture initialized on all ranks")
@@ -854,17 +859,25 @@ class ValidationRunner:
 
         local_batch_size = len(prompts)
 
-        # Apply demographic dropout if enabled (strip demographics from text)
-        # Validation always applies dropout if enabled (deterministic), matching training when dropout_prob=1.0
+        # Strip demographics from prompts if HCN or DemographicEncoder is enabled
+        # This matches training behavior: when use_hcn=True, demographics are stripped
+        # at dataset level and only clinical text is tokenized
+        use_hcn = self.args.get("use_hcn", False)
+        use_demographic_encoder = self.args.get("use_demographic_encoder", False)
         demo_use_dropout = self.args.get("demo_use_dropout", False)
-        if demo_use_dropout:
+        
+        # Strip demographics if HCN/DemographicEncoder is enabled OR if demographic dropout is enabled
+        if use_hcn or use_demographic_encoder or demo_use_dropout:
             from dataset_wds import extract_clinical_text
             # Strip demographics from prompts (same as training)
             # Note: Validation always applies if enabled (no probability check) to be deterministic
-            # This matches training behavior when demo_text_dropout_prob=1.0
+            # This matches training behavior when use_hcn=True or demo_text_dropout_prob=1.0
             prompts = [extract_clinical_text(prompt) for prompt in prompts]
             if self.accelerator.is_local_main_process and batch_start_idx == 0:
-                self.logger.info(f"✓ Applied demographic dropout: stripped demographics from validation prompts")
+                self.logger.info(
+                    f"✓ Stripped demographics from validation prompts "
+                    f"(use_hcn={use_hcn}, use_demographic_encoder={use_demographic_encoder}, demo_use_dropout={demo_use_dropout})"
+                )
 
         # Tokenize prompts
         text_inputs = self.tokenizer(

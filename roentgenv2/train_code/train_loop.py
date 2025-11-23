@@ -103,50 +103,13 @@ def train_loop(
                 )
 
                 # Get the text embedding for conditioning
+                # Note: For HCN mode, demographics are already stripped at dataset level (v1 behavior)
+                # For FairDiffusion/DemographicEncoder modes, full prompt is used
                 text_input_ids = batch["input_ids"]
                 if args.use_attention_mask:
                     attention_mask = batch["attention_mask"]
                 else:
                     attention_mask = None
-
-                # === Optional: Demographic Dropout (works with HCN or DemographicEncoder) ===
-                # Remove demographics from text to force model to use demographic encoder/HCN
-                use_demographic_dropout = (
-                    getattr(args, 'demo_use_dropout', False) and 
-                    global_step >= getattr(args, 'demo_dropout_start_step', 0) and
-                    torch.rand(1).item() < getattr(args, 'demo_text_dropout_prob', 0.0)
-                )
-                
-                if use_demographic_dropout:
-                    # Re-tokenize prompts WITHOUT demographics
-                    from dataset_wds import extract_clinical_text
-                    
-                    # Get the text from batch if available, otherwise decode from input_ids
-                    if "text" in batch:
-                        clean_prompts = [extract_clinical_text(text) for text in batch["text"]]
-                    else:
-                        # Decode input_ids back to text, then strip demographics
-                        tokenizer = text_encoder.tokenizer if hasattr(text_encoder, 'tokenizer') else None
-                        if tokenizer:
-                            prompts = tokenizer.batch_decode(text_input_ids, skip_special_tokens=True)
-                            clean_prompts = [extract_clinical_text(text) for text in prompts]
-                        else:
-                            clean_prompts = None
-                    
-                    if clean_prompts:
-                        # Re-tokenize clean prompts
-                        tokenizer = text_encoder.tokenizer if hasattr(text_encoder, 'tokenizer') else None
-                        if tokenizer:
-                            clean_tokenized = tokenizer(
-                                clean_prompts,
-                                padding="max_length",
-                                truncation=True,
-                                max_length=tokenizer.model_max_length,
-                                return_tensors="pt",
-                            )
-                            text_input_ids = clean_tokenized.input_ids.to(text_input_ids.device)
-                            if args.use_attention_mask:
-                                attention_mask = clean_tokenized.attention_mask.to(text_input_ids.device)
 
                 prompt_embeds = text_encoder(
                     input_ids=text_input_ids,
@@ -192,8 +155,7 @@ def train_loop(
                     )
 
                     # Auxiliary demographic classification losses
-                    # Always compute aux_loss to ensure gradients flow through auxiliary heads
-                    # (even if weight is 0, we need gradients for DDP)
+                    # Only compute if aux_logits are available (i.e., use_aux_loss=True)
                     if aux_logits is not None:
                         age_ce = F.cross_entropy(aux_logits["age"], batch["age_idx"])
                         sex_ce = F.cross_entropy(aux_logits["sex"], batch["sex_idx"])
@@ -291,8 +253,7 @@ def train_loop(
                 if comp_loss is not None:
                     loss = loss + args.hcn_comp_weight * comp_loss
 
-                # Always add aux_loss to ensure gradients flow (even if weight is 0)
-                # This prevents DDP "unused parameters" error when aux_weight=0
+                # Add aux_loss only if it was computed (i.e., use_aux_loss=True)
                 if aux_loss is not None:
                     loss = loss + args.hcn_aux_weight * aux_loss
                 

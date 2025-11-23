@@ -233,14 +233,28 @@ class RGFineTuningWebDataset(IterableDataset):
             if "race_idx" not in sample:
                 sample["race_idx"] = torch.tensor(parse_race(prompt), dtype=torch.long)
 
-        # Always tokenize the full prompt (retain demographics for text encoder)
-        prompt_tokenized = self.tokenizer(
-            prompt,
-            padding="max_length",
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-            return_tensors="pt",
-        )
+        # Tokenize prompt based on mode
+        if self.use_hcn or self.use_demographic_encoder:
+            # Extract clinical text only (remove demographics) for HCN or DemographicEncoder mode
+            # This matches v1 behavior: strip demographics at dataset level
+            clinical_text = extract_clinical_text(prompt)
+            prompt_tokenized = self.tokenizer(
+                clinical_text,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt",
+            )
+        else:
+            # Always tokenize the full prompt (retain demographics for text encoder)
+            # This is for FairDiffusion mode
+            prompt_tokenized = self.tokenizer(
+                prompt,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt",
+            )
 
         sample["input_ids"] = prompt_tokenized.input_ids.squeeze()
         sample["attention_mask"] = prompt_tokenized.attention_mask.squeeze()
@@ -379,8 +393,22 @@ class RGFineTuningImageDirectoryDataset(Dataset):
             sample["sex_idx"] = torch.tensor(parse_sex(prompt), dtype=torch.long)
             sample["race_idx"] = torch.tensor(parse_race(prompt), dtype=torch.long)
 
-        # Always use the full prompt for tokenization (retain demographic text)
-        prompt_tokenized = self.tokenizer(
+        # Tokenize prompt based on mode
+        if self.use_hcn or self.use_demographic_encoder:
+            # Extract clinical text only (remove demographics) for HCN or DemographicEncoder mode
+            # This matches v1 behavior: strip demographics at dataset level
+            clinical_text = extract_clinical_text(prompt)
+            prompt_tokenized = self.tokenizer(
+                clinical_text,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt",
+            )
+        else:
+            # Always use the full prompt for tokenization (retain demographic text)
+            # This is for FairDiffusion mode
+            prompt_tokenized = self.tokenizer(
             prompt,
             padding="max_length",
             truncation=True,
